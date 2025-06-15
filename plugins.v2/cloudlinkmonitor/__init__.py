@@ -58,7 +58,7 @@ class FileMonitorHandler(FileSystemEventHandler):
 
 class CloudLinkMonitor(_PluginBase):
     # 插件名称
-    plugin_name = "目录实时监控"
+    plugin_name = "目录实时监控2"
     # 插件描述
     plugin_desc = "监控目录文件变化，自动转移媒体文件（支持多盘轮询分发）。"
     # 插件图标
