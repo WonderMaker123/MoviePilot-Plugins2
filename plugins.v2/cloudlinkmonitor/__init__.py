@@ -58,15 +58,15 @@ class FileMonitorHandler(FileSystemEventHandler):
 
 class CloudLinkMonitor(_PluginBase):
     # 插件名称
-    plugin_name = "目录实时监控2"
+    plugin_name = "目录实时监控"
     # 插件描述
     plugin_desc = "监控目录文件变化，自动转移媒体文件（支持多盘轮询分发）。"
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "2.6.2"  # 版本号+1
+    plugin_version = "2.6.0"
     # 插件作者
-    plugin_author = "wonder"
+    plugin_author = "thsrite"
     # 作者主页
     author_url = "https://github.com/thsrite"
     # 插件配置项ID前缀
@@ -117,7 +117,7 @@ class CloudLinkMonitor(_PluginBase):
     # 文件稳定检测配置
     _stability_checks = 5
     _check_interval = 2
-
+    
     # 存储源目录转移方式
     _transferconf: Dict[str, Optional[str]] = {}
     _overwrite_mode: Dict[str, Optional[str]] = {}
@@ -133,7 +133,7 @@ class CloudLinkMonitor(_PluginBase):
         self.mediaChain = MediaChain()
         self.storagechain = StorageChain()
         self.filetransfer = FileManagerModule()
-
+        
         # 清空所有配置和状态
         self._dirconf = {}
         self._transferconf = {}
@@ -178,7 +178,7 @@ class CloudLinkMonitor(_PluginBase):
             monitor_dirs_lines = self._monitor_dirs.split("\n")
             if not monitor_dirs_lines:
                 return
-
+            
             for mon_path_line in monitor_dirs_lines:
                 if not mon_path_line.strip():
                     continue
@@ -199,22 +199,22 @@ class CloudLinkMonitor(_PluginBase):
                 if ':' not in mon_path_line:
                     logger.error(f"监控目录格式错误，缺少冒号':': {mon_path_line}")
                     continue
-
+                
                 parts = mon_path_line.split(':', 1)
                 mon_path = parts[0].strip()
                 # 目标目录可以是逗号分隔的列表
                 dest_paths_str = parts[1].split(',')
-
+                
                 target_paths = [Path(p.strip()) for p in dest_paths_str if p.strip()]
 
                 if not target_paths:
                     logger.error(f"监控目录 {mon_path} 未配置有效的目标目录。")
                     continue
-
+                
                 self._dirconf[mon_path] = target_paths
                 self._transferconf[mon_path] = _transfer_type
                 self._overwrite_mode[mon_path] = _overwrite_mode
-
+                
                 # 初始化分发状态
                 self._dir_indexes[mon_path] = 0
                 self._dir_allocation_map[mon_path] = {}
@@ -361,7 +361,7 @@ class CloudLinkMonitor(_PluginBase):
                 index = self._dir_indexes[mon_path]
                 self._dir_indexes[mon_path] = (index + 1) % len(targets)
                 allocation[top_level_dir] = index
-
+        
         return targets[index]
 
     def __handle_file(self, event_path: str, mon_path: str):
@@ -372,15 +372,15 @@ class CloudLinkMonitor(_PluginBase):
         try:
             if not file_path.exists():
                 return
-
+            
             # 1. 检查文件是否稳定
             if not self._is_file_stable(file_path):
                 logger.info(f"文件未稳定，跳过: {event_path}")
                 return
             # 稳定检查后再次确认文件存在
             if not file_path.exists():
-                logger.warning(f"稳定检查后文件消失，跳过: {event_path}")
-                return
+                 logger.warning(f"稳定检查后文件消失，跳过: {event_path}")
+                 return
 
             with lock:
                 # 2. 检查历史记录和各种过滤规则 (此部分逻辑不变)
@@ -389,7 +389,7 @@ class CloudLinkMonitor(_PluginBase):
                     logger.info("文件已处理过：%s" % event_path)
                     return
 
-                if any(s in event_path for s in ['/@Recycle/', '/#recycle/', '/.', '#eaDir']):
+                if any(s in event_path for s in ['/@Recycle/', '/#recycle/', '/.','#eaDir']):
                     logger.debug(f"{event_path} 是回收站或隐藏的文件")
                     return
 
@@ -398,7 +398,7 @@ class CloudLinkMonitor(_PluginBase):
                         if keyword and re.findall(keyword, event_path):
                             logger.info(f"{event_path} 命中过滤关键字 {keyword}，不处理")
                             return
-
+                
                 if file_path.suffix not in settings.RMT_MEDIAEXT:
                     logger.debug(f"{event_path} 不是媒体文件")
                     return
@@ -412,10 +412,9 @@ class CloudLinkMonitor(_PluginBase):
                         return
 
                 if self._size and file_path.is_file() and file_path.stat().st_size < float(self._size) * 1024 ** 2:
-                    logger.info(
-                        f"{file_path} 文件大小({file_path.stat().st_size / 1024 ** 2:.2f}MB)小于设定值({self._size}MB)，不处理")
+                    logger.info(f"{file_path} 文件大小({file_path.stat().st_size / 1024**2:.2f}MB)小于设定值({self._size}MB)，不处理")
                     return
-
+                
                 # 3. 识别媒体信息 (此部分逻辑不变)
                 file_meta = MetaInfoPath(file_path)
                 if not file_meta.name:
@@ -426,7 +425,7 @@ class CloudLinkMonitor(_PluginBase):
                 if not file_item:
                     logger.warn(f"{event_path} 未找到对应的文件项")
                     return
-
+                
                 mediainfo: MediaInfo = self.chain.recognize_media(meta=file_meta)
                 if not mediainfo:
                     # ... (处理无法识别的媒体，逻辑不变)
@@ -434,16 +433,11 @@ class CloudLinkMonitor(_PluginBase):
 
                 # 4. 获取分发的目标目录
                 target_path_base = self._get_target_dir(mon_path, file_path)
+                logger.info(f"文件 {file_path.name} 将被分发到: {target_path_base}")
                 
-                # =========================================================
-                # ▼▼▼ 在这里添加下面这行代码 ▼▼▼
-                logger.info(f"[分发选择] 文件 '{file_path.name}' 的目标基准目录是: {target_path_base}")
-                # ▲▲▲ 在这里添加上面这行代码 ▲▲▲
-                # =========================================================
-
                 transfer_type = self._transferconf.get(mon_path)
                 overwrite_mode = self._overwrite_mode.get(mon_path) or 'rename'
-
+                
                 # 5. 构建转移配置
                 target_dir = TransferDirectoryConf(
                     library_path=target_path_base,
@@ -455,7 +449,7 @@ class CloudLinkMonitor(_PluginBase):
                     notify=False,
                     library_storage="local"
                 )
-
+                
                 episodes_info = None
                 if mediainfo.type == MediaType.TV:
                     episodes_info = self.tmdbchain.tmdb_episodes(
@@ -472,9 +466,9 @@ class CloudLinkMonitor(_PluginBase):
                 )
 
                 if not transferinfo or not transferinfo.success:
-                    # ... (处理转移失败，逻辑不变)
+                     # ... (处理转移失败，逻辑不变)
                     return
-
+                
                 if self._history:
                     # ... (添加成功历史，逻辑不变)
                     pass
@@ -482,19 +476,19 @@ class CloudLinkMonitor(_PluginBase):
                 if self._scrape:
                     # ... (刮削，逻辑不变)
                     pass
-
+                
                 if self._notify:
                     # ... (添加到待发送消息列表，逻辑不变)
                     pass
-
+                
                 if self._refresh:
                     # ... (广播事件，逻辑不变)
                     pass
-
+                
                 if self._softlink or self._strm:
                     # ... (联动其他插件，逻辑不变)
                     pass
-
+                
                 if transfer_type == "move":
                     # ... (移动模式下删除空目录，逻辑不变)
                     pass
@@ -504,8 +498,8 @@ class CloudLinkMonitor(_PluginBase):
 
     # ... remote_sync, sync_all, event_handler, send_msg ...
     # ... get_state, get_command, get_api, get_service, sync ...
-    # 以上方法均无需修改
-
+    # 以上方法均无需修改，因为核心逻辑已在 __handle_file 中实现
+    
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         # 返回UI界面的配置项定义
         return [
@@ -515,87 +509,41 @@ class CloudLinkMonitor(_PluginBase):
                     {
                         'component': 'VRow',
                         'content': [
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
-                             'content': [{'component': 'VSwitch', 'props': {'model': 'enabled', 'label': '启用插件'}}]},
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
-                             'content': [{'component': 'VSwitch', 'props': {'model': 'notify', 'label': '发送通知'}}]},
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [
-                                {'component': 'VSwitch', 'props': {'model': 'onlyonce', 'label': '立即运行一次'}}]}
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'enabled', 'label': '启用插件'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'notify', 'label': '发送通知'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'onlyonce', 'label': '立即运行一次'}}]}
                         ]
                     },
                     {
                         'component': 'VRow',
                         'content': [
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [
-                                {'component': 'VSwitch', 'props': {'model': 'history', 'label': '存储历史记录'}}]},
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
-                             'content': [{'component': 'VSwitch', 'props': {'model': 'scrape', 'label': '是否刮削'}}]},
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [
-                                {'component': 'VSwitch', 'props': {'model': 'category', 'label': '是否二级分类'}}]}
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'history', 'label': '存储历史记录'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'scrape', 'label': '是否刮削'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'category', 'label': '是否二级分类'}}]}
                         ]
                     },
                     {
                         'component': 'VRow',
                         'content': [
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [
-                                {'component': 'VSwitch', 'props': {'model': 'refresh', 'label': '刷新媒体库'}}]},
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [
-                                {'component': 'VSwitch', 'props': {'model': 'softlink', 'label': '联动实时软连接'}}]},
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
-                             'content': [{'component': 'VSwitch', 'props': {'model': 'strm', 'label': '联动Strm生成'}}]}
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'refresh', 'label': '刷新媒体库'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'softlink', 'label': '联动实时软连接'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'strm', 'label': '联动Strm生成'}}]}
                         ]
                     },
                     {
                         'component': 'VRow',
                         'content': [
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSelect',
-                                                                                               'props': {'model': 'mode',
-                                                                                                         'label': '监控模式',
-                                                                                                         'items': [{
-                                                                                                             'title': '兼容模式',
-                                                                                                             'value': 'compatibility'},
-                                                                                                             {
-                                                                                                                 'title': '性能模式',
-                                                                                                                 'value': 'fast'}]}}]},
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSelect',
-                                                                                               'props': {
-                                                                                                   'model': 'transfer_type',
-                                                                                                   'label': '转移方式',
-                                                                                                   'items': [{
-                                                                                                       'title': '移动',
-                                                                                                       'value': 'move'},
-                                                                                                       {
-                                                                                                           'title': '复制',
-                                                                                                           'value': 'copy'},
-                                                                                                       {
-                                                                                                           'title': '硬链接',
-                                                                                                           'value': 'link'},
-                                                                                                       {
-                                                                                                           'title': '软链接',
-                                                                                                           'value': 'softlink'},
-                                                                                                       {
-                                                                                                           'title': 'Rclone复制',
-                                                                                                           'value': 'rclone_copy'},
-                                                                                                       {
-                                                                                                           'title': 'Rclone移动',
-                                                                                                           'value': 'rclone_move'}]}}]},
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [
-                                {'component': 'VTextField', 'props': {'model': 'cron', 'label': '定时任务',
-                                                                      'placeholder': '留空则禁用'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSelect', 'props': {'model': 'mode', 'label': '监控模式', 'items': [{'title': '兼容模式', 'value': 'compatibility'}, {'title': '性能模式', 'value': 'fast'}]}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSelect', 'props': {'model': 'transfer_type', 'label': '转移方式', 'items': [{'title': '移动', 'value': 'move'}, {'title': '复制', 'value': 'copy'}, {'title': '硬链接', 'value': 'link'}, {'title': '软链接', 'value': 'softlink'}, {'title': 'Rclone复制', 'value': 'rclone_copy'}, {'title': 'Rclone移动', 'value': 'rclone_move'}]}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'cron', 'label': '定时任务', 'placeholder': '留空则禁用'}}]},
                         ]
                     },
                     {
                         'component': 'VRow',
                         'content': [
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [
-                                {'component': 'VTextField', 'props': {'model': 'interval', 'label': '入库消息延迟(秒)',
-                                                                      'type': 'number'}}]},
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [
-                                {'component': 'VTextField',
-                                 'props': {'model': 'stability_checks', 'label': '稳定检测次数', 'type': 'number'}}]},
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [
-                                {'component': 'VTextField',
-                                 'props': {'model': 'check_interval', 'label': '稳定检测间隔(秒)', 'type': 'number'}}]}
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'interval', 'label': '入库消息延迟(秒)', 'type': 'number'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'stability_checks', 'label': '稳定检测次数', 'type': 'number'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'check_interval', 'label': '稳定检测间隔(秒)', 'type': 'number'}}]}
                         ]
                     },
                     {
