@@ -63,7 +63,7 @@ class CloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "2.6.1" # 版本号提升
+    plugin_version = "2.6.2" # 版本号提升
     # 插件作者
     plugin_author = "wonderful"
     # 作者主页
@@ -134,9 +134,10 @@ class CloudLinkMonitor(_PluginBase):
             mtype=mediainfo.type.value,
             tmdbid=mediainfo.tmdb_id
         )
-        if history_entry and history_entry.dest_path:
+        # 修正: 使用 'dest' 而不是 'dest_path'
+        if history_entry and history_entry.dest:
             # 确认历史条目的目标目录是否在当前配置的目标目录列表中
-            historical_dest_path = Path(history_entry.dest_path)
+            historical_dest_path = Path(history_entry.dest)
             for dest in destinations:
                 try:
                     if historical_dest_path.is_relative_to(dest):
@@ -229,6 +230,7 @@ class CloudLinkMonitor(_PluginBase):
                 paths = mon_path_conf.split(":", 1)
 
                 # 目的目录
+                mon_path = ""
                 if len(paths) > 1:
                     mon_path = paths[0].strip()
                     # 用逗号分割多个目标目录
@@ -255,15 +257,20 @@ class CloudLinkMonitor(_PluginBase):
                 if self._enabled:
                     # 检查媒体库目录是不是下载目录的子目录
                     target_paths_check = self._dirconf.get(mon_path) or []
+                    can_monitor = True
                     for target_path in target_paths_check:
                         try:
                             if target_path and target_path.is_relative_to(Path(mon_path)):
-                                logger.warn(f"{target_path} 是监控目录 {mon_path} 的子目录，无法监控")
-                                self.systemmessage.put(f"{target_path} 是下载目录 {mon_path} 的子目录，无法监控")
-                                continue
+                                logger.warn(f"目标目录 {target_path} 是监控目录 {mon_path} 的子目录，无法监控")
+                                self.systemmessage.put(f"目标目录 {target_path} 是监控目录 {mon_path} 的子目录，无法监控")
+                                can_monitor = False
+                                break
                         except Exception as e:
                             logger.debug(str(e))
                             pass
+                    
+                    if not can_monitor:
+                        continue
 
                     try:
                         if self._mode == "compatibility":
@@ -508,6 +515,8 @@ class CloudLinkMonitor(_PluginBase):
                     target_dir.library_storage = "local"
                     target_dir.library_category_folder = self._category
                 else:
+                    # 如果目录助手匹配成功，需要将轮询选择的目标目录赋值给它
+                    target_dir.library_path = target
                     target_dir.transfer_type = transfer_type
                     target_dir.scraping = self._scrape
                 
