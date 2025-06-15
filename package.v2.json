@@ -406,10 +406,10 @@
     }
   },
   "CloudLinkMonitor": {
-    "name": "目录实时监控",
+    "name": "目录实时监控2",
     "description": "监控云盘目录文件变化，自动转移媒体文件。",
     "labels": "云盘,工具",
-    "version": "2.5.9",
+    "version": "2.6.2",
     "icon": "Linkease_A.png",
     "author": "thsrite",
     "level": 1,
