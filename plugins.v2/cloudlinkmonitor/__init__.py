@@ -38,9 +38,7 @@ lock = threading.Lock()
 
 
 class FileMonitorHandler(FileSystemEventHandler):
-    """
-    目录监控响应类
-    """
+    """目录监控响应类"""
     def __init__(self, monpath: str, sync: Any, **kwargs):
         super(FileMonitorHandler, self).__init__(**kwargs)
         self._watch_path = monpath
@@ -54,11 +52,10 @@ class FileMonitorHandler(FileSystemEventHandler):
 
 
 class CloudLinkMonitor(_PluginBase):
-    # 插件信息
     plugin_name = "多目录实时监控"
     plugin_desc = "监控多目录文件变化，自动转移媒体文件，支持轮询分发和持久化缓存。"
     plugin_icon = "Linkease_A.png"
-    plugin_version = "2.8.2"  # 最终完整修复版
+    plugin_version = "2.8.3"  # 修复语法错误
     plugin_author = "wonderful"
     author_url = "https://github.com/WonderMaker123/MoviePilot-Plugins2/"
     plugin_config_prefix = "cloudlinkmonitor_"
@@ -101,7 +98,6 @@ class CloudLinkMonitor(_PluginBase):
     _allocation_cache: Dict[int, Path] = {}
 
     def _save_state_to_file(self):
-        """将轮询索引持久化保存到文件"""
         if not self._state_file: return
         try:
             with self._state_file.open('w', encoding='utf-8') as f:
@@ -110,7 +106,6 @@ class CloudLinkMonitor(_PluginBase):
             logger.error(f"无法保存轮询状态到文件 {self._state_file}: {e}")
 
     def _load_state_from_file(self) -> Dict[str, int]:
-        """从文件加载轮询索引"""
         if not self._state_file or not self._state_file.exists(): return {}
         try:
             with self._state_file.open('r', encoding='utf-8') as f:
@@ -121,7 +116,6 @@ class CloudLinkMonitor(_PluginBase):
             return {}
 
     def _save_cache_to_file(self):
-        """将分配缓存持久化保存到文件"""
         if not self._cache_file: return
         try:
             with self._cache_file.open('w', encoding='utf-8') as f:
@@ -131,7 +125,6 @@ class CloudLinkMonitor(_PluginBase):
             logger.error(f"无法保存分配缓存到文件 {self._cache_file}: {e}")
 
     def _load_cache_from_file(self) -> Dict[int, Path]:
-        """从文件加载分配缓存"""
         if not self._cache_file or not self._cache_file.exists(): return {}
         try:
             with self._cache_file.open('r', encoding='utf-8') as f:
@@ -142,32 +135,23 @@ class CloudLinkMonitor(_PluginBase):
             return {}
 
     def _update_cache_and_persist(self, tmdb_id: int, dest: Path):
-        """更新缓存并立即持久化"""
         self._allocation_cache[tmdb_id] = dest
         self._save_cache_to_file()
 
     def _get_round_robin_destination(self, mon_path: str, mediainfo: MediaInfo) -> Optional[Path]:
-        """
-        根据媒体信息和轮询策略选择一个目标目录。
-        【最终保底版逻辑】: 1.内存缓存 -> 2.历史记录 -> 3.物理扫描 -> 4.轮询选择
-        """
         destinations = self._dirconf.get(mon_path)
         if not destinations:
             logger.error(f"监控源 {mon_path} 未配置目标目录")
             return None
-
         if len(destinations) == 1:
             return destinations[0]
 
         tmdb_id = mediainfo.tmdb_id
-
-        # 1. 检查内存/持久化缓存
         if tmdb_id in self._allocation_cache:
             cached_dest = self._allocation_cache[tmdb_id]
             logger.info(f"为 '{mediainfo.title} ({mediainfo.year})' 命中缓存 -> {cached_dest}")
             return cached_dest
 
-        # 2. 缓存未命中，查询历史数据库
         history_entry = self.transferhis.get_by_type_tmdbid(mtype=mediainfo.type.value, tmdbid=tmdb_id)
         if history_entry and history_entry.dest:
             historical_dest_path = Path(history_entry.dest)
@@ -177,10 +161,8 @@ class CloudLinkMonitor(_PluginBase):
                         logger.info(f"为 '{mediainfo.title} ({mediainfo.year})' 找到历史记录 -> {dest}")
                         self._update_cache_and_persist(tmdb_id, dest)
                         return dest
-                except ValueError:
-                    continue
+                except ValueError: continue
         
-        # 3. 物理扫描所有目标目录作为保底
         logger.info(f"缓存和历史未命中，为 '{mediainfo.title} ({mediainfo.year})' 启动物理目录扫描...")
         expected_folder_prefix = f"{mediainfo.title} ({mediainfo.year})"
         for dest in destinations:
@@ -195,14 +177,11 @@ class CloudLinkMonitor(_PluginBase):
                 logger.warning(f"扫描目录 {dest} 时出错: {e}")
                 continue
 
-        # 4. 如果以上全部未命中，执行轮询
         logger.info(f"首次转移 '{mediainfo.title} ({mediainfo.year})'，执行轮询...")
         last_index = self._round_robin_index.get(mon_path, -1)
         next_index = (last_index + 1) % len(destinations)
-        
         self._round_robin_index[mon_path] = next_index
         self._save_state_to_file()
-
         chosen_dest = destinations[next_index]
         logger.info(f"轮询为 '{mon_path}' 选择索引 {next_index} -> {chosen_dest}")
         self._update_cache_and_persist(tmdb_id, chosen_dest)
@@ -370,4 +349,135 @@ class CloudLinkMonitor(_PluginBase):
                     shutil.rmtree(parent_dir, ignore_errors=True)
                     parent_dir = parent_dir.parent
                 else: break
-        except Exception as
+        except Exception as e:
+            logger.error(f"删除空目录时出错: {e}")
+            
+    def add_to_notification_queue(self, file_path, mediainfo, file_meta, transferinfo):
+        key = f"{mediainfo.title} ({mediainfo.year}) S{file_meta.season:02d}" if mediainfo.type == MediaType.TV else f"{mediainfo.title} ({mediainfo.year})"
+        if key not in self._medias:
+            self._medias[key] = {"files": [], "time": datetime.datetime.now()}
+        self._medias[key]["files"].append({"path": str(file_path), "mediainfo": mediainfo, "file_meta": file_meta, "transferinfo": transferinfo})
+        self._medias[key]["time"] = datetime.datetime.now()
+
+    def send_msg(self):
+        if not self._medias: return
+        now = datetime.datetime.now()
+        for key, data in list(self._medias.items()):
+            if (now - data['time']).total_seconds() > self._interval:
+                files = data['files']
+                first_item = files[0]
+                mediainfo = first_item['mediainfo']
+                total_size = sum(f['transferinfo'].total_size for f in files)
+                file_count = len(files)
+                final_transfer_info = first_item['transferinfo']
+                final_transfer_info.total_size = total_size
+                final_transfer_info.file_count = file_count
+                season_episode = None
+                if mediainfo.type == MediaType.TV:
+                    episodes = sorted([f['file_meta'].begin_episode for f in files if f['file_meta'].begin_episode])
+                    season_episode = f"S{first_item['file_meta'].season:02d} {StringUtils.format_ep(episodes)}"
+                self.transferchian.send_transfer_message(meta=first_item['file_meta'], mediainfo=mediainfo, transferinfo=final_transfer_info, season_episode=season_episode)
+                del self._medias[key]
+
+    def __update_config(self):
+        self.update_config({
+            "enabled": self._enabled, "notify": self._notify, "onlyonce": self._onlyonce, "history": self._history,
+            "scrape": self._scrape, "category": self._category, "refresh": self._refresh, "softlink": self._softlink,
+            "strm": self._strm, "mode": self._mode, "transfer_type": self._transfer_type,
+            "monitor_dirs": self._monitor_dirs, "exclude_keywords": self._exclude_keywords,
+            "interval": self._interval, "cron": self._cron, "size": self._size
+        })
+
+    @eventmanager.register(EventType.PluginAction)
+    def remote_sync(self, event: Event):
+        if event and event.event_data and event.event_data.get("action") == "cloud_link_sync":
+            self.post_message(channel=event.event_data.get("channel"), title="开始同步监控目录 ...", userid=event.event_data.get("user"))
+            self.sync_all()
+            self.post_message(channel=event.event_data.get("channel"), title="监控目录同步完成！", userid=event.event_data.get("user"))
+
+    def sync_all(self):
+        logger.info("开始全量同步监控目录 ...")
+        for mon_path in self._dirconf.keys():
+            logger.info(f"处理监控目录 {mon_path} ...")
+            try:
+                list_files = [p for p in Path(mon_path).rglob('*') if p.suffix.lower() in settings.RMT_MEDIAEXT]
+                logger.info(f"发现 {len(list_files)} 个媒体文件")
+                for file_path in list_files:
+                    self.__handle_file(event_path=str(file_path), mon_path=mon_path)
+            except Exception as e:
+                logger.error(f"处理目录 {mon_path} 时出错: {e}")
+        logger.info("全量同步监控目录完成！")
+
+    def get_state(self) -> bool:
+        return self._enabled
+
+    @staticmethod
+    def get_command() -> List[Dict[str, Any]]:
+        return [{"cmd": "/cloud_link_sync", "event": EventType.PluginAction, "desc": "多目录监控同步", "data": {"action": "cloud_link_sync"}}]
+
+    def get_api(self) -> List[Dict[str, Any]]:
+        return [{"path": "/cloud_link_sync", "endpoint": self.sync, "methods": ["GET"], "summary": "多目录监控同步"}]
+
+    def get_service(self) -> List[Dict[str, Any]]:
+        if self._enabled and self._cron:
+            return [{"id": "CloudLinkMonitor", "name": "多目录监控全量同步", "trigger": CronTrigger.from_crontab(self._cron),
+                     "func": self.sync_all, "kwargs": {}}]
+        return []
+
+    def sync(self) -> schemas.Response:
+        self.sync_all()
+        return schemas.Response(success=True)
+
+    def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        placeholder_text = ('每一行一个配置，支持单目标或多目标轮询分发。\n'
+                            '【单目标】: /监控目录:/目标目录\n'
+                            '【多目标轮询】: /监控目录:/目标1,/目标2,/目标3\n'
+                            '【自定义转移】: /监控目录:/目标目录#转移方式 (例如 #move)\n'
+                            '【自定义覆盖】: /监控目录:/目标目录@覆盖方式 (例如 @rename)')
+        return ([{'component': 'VForm', 'content': [
+            {'component': 'VRow', 'content': [
+                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'enabled', 'label': '启用插件'}}]},
+                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'notify', 'label': '发送通知'}}]},
+                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'onlyonce', 'label': '立即运行一次'}}]}
+            ]},
+            {'component': 'VRow', 'content': [
+                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'history', 'label': '存储历史记录'}}]},
+                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'scrape', 'label': '是否刮削'}}]},
+                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'category', 'label': '是否二级分类'}}]}
+            ]},
+            {'component': 'VRow', 'content': [
+                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'refresh', 'label': '刷新媒体库'}}]},
+                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'softlink', 'label': '联动实时软连接'}}]},
+                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'strm', 'label': '联动Strm生成'}}]}
+            ]},
+            {'component': 'VRow', 'content': [
+                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSelect', 'props': {'model': 'mode', 'label': '监控模式', 'items': [{'title': '兼容模式', 'value': 'compatibility'}, {'title': '性能模式', 'value': 'fast'}]}}]},
+                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSelect', 'props': {'model': 'transfer_type', 'label': '转移方式', 'items': [{'title': '移动', 'value': 'move'}, {'title': '复制', 'value': 'copy'}, {'title': '硬链接', 'value': 'link'}, {'title': '软链接', 'value': 'softlink'}, {'title': 'Rclone复制', 'value': 'rclone_copy'}, {'title': 'Rclone移动', 'value': 'rclone_move'}]}}]},
+                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'cron', 'label': '定时任务', 'placeholder': '留空则禁用'}}]}
+            ]},
+            {'component': 'VRow', 'content': [
+                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'interval', 'label': '入库消息延迟(秒)', 'type': 'number'}}]},
+                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'size', 'label': '最小文件大小(MB)', 'type': 'number'}}]}
+            ]},
+            {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VTextarea', 'props': {'model': 'monitor_dirs', 'label': '监控目录', 'rows': 5, 'placeholder': placeholder_text}}]}]},
+            {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VTextarea', 'props': {'model': 'exclude_keywords', 'label': '排除关键词', 'rows': 2, 'placeholder': '每一行一个关键词'}}]}]}
+        ]}], 
+        {"enabled": False, "notify": True, "onlyonce": False, "history": True, "scrape": False, "category": True,
+         "refresh": True, "softlink": False, "strm": False, "mode": "fast", "transfer_type": "move",
+         "monitor_dirs": "", "exclude_keywords": "", "interval": 10, "cron": "", "size": 100})
+
+    def get_page(self) -> List[dict]:
+        return []
+
+    def stop_service(self):
+        if self._observer:
+            for observer in self._observer:
+                try:
+                    observer.stop()
+                    observer.join()
+                except Exception as e:
+                    logger.error(f"停止监控器时出错: {e}")
+        self._observer = []
+        if self._scheduler and self._scheduler.running:
+            self._scheduler.shutdown()
+        self._scheduler = None
