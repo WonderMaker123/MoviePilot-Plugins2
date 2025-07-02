@@ -55,7 +55,7 @@ class CloudLinkMonitor(_PluginBase):
     plugin_name = "多目录实时监控"
     plugin_desc = "监控多目录文件变化，自动转移媒体文件，支持轮询分发和持久化缓存。"
     plugin_icon = "Linkease_A.png"
-    plugin_version = "2.8.6"  # 终极稳定版
+    plugin_version = "2.8.7"  # 终极稳定版 (增加并发锁)
     plugin_author = "wonderful"
     author_url = "https://github.com/WonderMaker123/MoviePilot-Plugins2/"
     plugin_config_prefix = "cloudlinkmonitor_"
@@ -92,6 +92,9 @@ class CloudLinkMonitor(_PluginBase):
     _cache_file: Optional[Path] = None
     _round_robin_index: Dict[str, int] = {}
     _allocation_cache: Dict[int, Path] = {}
+
+    # 并发锁
+    _destination_lock: Optional[threading.Lock] = None
 
     def _save_state_to_file(self):
         if not self._state_file: return
@@ -135,55 +138,60 @@ class CloudLinkMonitor(_PluginBase):
         self._save_cache_to_file()
 
     def _get_round_robin_destination(self, mon_path: str, mediainfo: MediaInfo) -> Optional[Path]:
-        destinations = self._dirconf.get(mon_path)
-        if not destinations:
-            logger.error(f"监控源 {mon_path} 未配置目标目录")
-            return None
-        if len(destinations) == 1:
-            return destinations[0]
+        # 【修复】使用 with 语句包裹整个函数，实现自动加锁和解锁，防止并发冲突
+        with self._destination_lock:
+            destinations = self._dirconf.get(mon_path)
+            if not destinations:
+                logger.error(f"监控源 {mon_path} 未配置目标目录")
+                return None
+            if len(destinations) == 1:
+                return destinations[0]
 
-        tmdb_id = mediainfo.tmdb_id
-        if tmdb_id in self._allocation_cache:
-            cached_dest = self._allocation_cache[tmdb_id]
-            logger.info(f"为 '{mediainfo.title} ({mediainfo.year})' 命中缓存 -> {cached_dest}")
-            return cached_dest
+            tmdb_id = mediainfo.tmdb_id
+            if tmdb_id in self._allocation_cache:
+                cached_dest = self._allocation_cache[tmdb_id]
+                logger.info(f"为 '{mediainfo.title} ({mediainfo.year})' 命中缓存 -> {cached_dest}")
+                return cached_dest
 
-        history_entry = self.transferhis.get_by_type_tmdbid(mtype=mediainfo.type.value, tmdbid=tmdb_id)
-        if history_entry and history_entry.dest:
-            historical_dest_path = Path(history_entry.dest)
+            history_entry = self.transferhis.get_by_type_tmdbid(mtype=mediainfo.type.value, tmdbid=tmdb_id)
+            if history_entry and history_entry.dest:
+                historical_dest_path = Path(history_entry.dest)
+                for dest in destinations:
+                    try:
+                        if historical_dest_path.is_relative_to(dest):
+                            logger.info(f"为 '{mediainfo.title} ({mediainfo.year})' 找到历史记录 -> {dest}")
+                            self._update_cache_and_persist(tmdb_id, dest)
+                            return dest
+                    except ValueError: continue
+            
+            logger.info(f"缓存和历史未命中，为 '{mediainfo.title} ({mediainfo.year})' 启动物理目录扫描...")
+            expected_folder_prefix = f"{mediainfo.title} ({mediainfo.year})"
             for dest in destinations:
+                if not dest.is_dir(): continue
                 try:
-                    if historical_dest_path.is_relative_to(dest):
-                        logger.info(f"为 '{mediainfo.title} ({mediainfo.year})' 找到历史记录 -> {dest}")
-                        self._update_cache_and_persist(tmdb_id, dest)
-                        return dest
-                except ValueError: continue
-        
-        logger.info(f"缓存和历史未命中，为 '{mediainfo.title} ({mediainfo.year})' 启动物理目录扫描...")
-        expected_folder_prefix = f"{mediainfo.title} ({mediainfo.year})"
-        for dest in destinations:
-            if not dest.is_dir(): continue
-            try:
-                for sub_dir in dest.iterdir():
-                    if sub_dir.is_dir() and sub_dir.name.startswith(expected_folder_prefix):
-                        logger.info(f"物理扫描命中！在 '{dest}' 找到已存在目录: '{sub_dir.name}'")
-                        self._update_cache_and_persist(tmdb_id, dest)
-                        return dest
-            except OSError as e:
-                logger.warning(f"扫描目录 {dest} 时出错: {e}")
-                continue
+                    for sub_dir in dest.iterdir():
+                        if sub_dir.is_dir() and sub_dir.name.startswith(expected_folder_prefix):
+                            logger.info(f"物理扫描命中！在 '{dest}' 找到已存在目录: '{sub_dir.name}'")
+                            self._update_cache_and_persist(tmdb_id, dest)
+                            return dest
+                except OSError as e:
+                    logger.warning(f"扫描目录 {dest} 时出错: {e}")
+                    continue
 
-        logger.info(f"首次转移 '{mediainfo.title} ({mediainfo.year})'，执行轮询...")
-        last_index = self._round_robin_index.get(mon_path, -1)
-        next_index = (last_index + 1) % len(destinations)
-        self._round_robin_index[mon_path] = next_index
-        self._save_state_to_file()
-        chosen_dest = destinations[next_index]
-        logger.info(f"轮询为 '{mon_path}' 选择索引 {next_index} -> {chosen_dest}")
-        self._update_cache_and_persist(tmdb_id, chosen_dest)
-        return chosen_dest
+            logger.info(f"首次转移 '{mediainfo.title} ({mediainfo.year})'，执行轮询...")
+            last_index = self._round_robin_index.get(mon_path, -1)
+            next_index = (last_index + 1) % len(destinations)
+            self._round_robin_index[mon_path] = next_index
+            self._save_state_to_file()
+            chosen_dest = destinations[next_index]
+            logger.info(f"轮询为 '{mon_path}' 选择索引 {next_index} -> {chosen_dest}")
+            self._update_cache_and_persist(tmdb_id, chosen_dest)
+            return chosen_dest
 
     def init_plugin(self, config: dict = None):
+        # 【修复】初始化并发锁
+        self._destination_lock = threading.Lock()
+        
         self.transferhis = TransferHistoryOper()
         self.downloadhis = DownloadHistoryOper()
         self.transferchian = TransferChain()
@@ -350,8 +358,10 @@ class CloudLinkMonitor(_PluginBase):
             
     def add_to_notification_queue(self, file_path, mediainfo, file_meta, transferinfo):
         if mediainfo.type == MediaType.TV:
-            season_num_match = re.search(r'\d+', str(file_meta.season))
-            # Fallback to 1 if no number is found in the season string
+            # 确保 file_meta.season 不为 None，然后转换为字符串进行正则搜索
+            season_str = str(file_meta.season) if file_meta.season is not None else ''
+            season_num_match = re.search(r'\d+', season_str)
+            # 确保备用值是整数 1
             season_num = int(season_num_match.group(0)) if season_num_match else 1
             key = f"{mediainfo.title} ({mediainfo.year}) S{season_num:02d}"
         else:
@@ -378,8 +388,10 @@ class CloudLinkMonitor(_PluginBase):
                 season_episode = None
                 if mediainfo.type == MediaType.TV:
                     episodes = sorted([f['file_meta'].begin_episode for f in files if f['file_meta'].begin_episode])
-                    season_num_match = re.search(r'\d+', str(first_item['file_meta'].season))
-                    # Fallback to 1 if no number is found in the season string
+                    # 确保 first_item['file_meta'].season 不为 None，然后转换为字符串进行正则搜索
+                    season_str = str(first_item['file_meta'].season) if first_item['file_meta'].season is not None else ''
+                    season_num_match = re.search(r'\d+', season_str)
+                    # 确保备用值是整数 1
                     season_num = int(season_num_match.group(0)) if season_num_match else 1
                     season_episode = f"S{season_num:02d} {StringUtils.format_ep(episodes)}"
                 self.transferchian.send_transfer_message(meta=first_item['file_meta'], mediainfo=mediainfo, transferinfo=final_transfer_info, season_episode=season_episode)
