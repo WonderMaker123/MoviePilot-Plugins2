@@ -64,7 +64,7 @@ class CloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "2.9.1"  # 版本号提升，体现修复
+    plugin_version = "2.9.2" # 版本号提升
     # 插件作者
     plugin_author = "wonderful"
     # 作者主页
@@ -116,8 +116,6 @@ class CloudLinkMonitor(_PluginBase):
     _medias = {}
     # 退出事件
     _event = threading.Event()
-    # 【新增】运行时剧集目的地缓存，解决竞争问题
-    _series_dest_cache: Dict[int, Path] = {}
 
     def _save_state_to_file(self):
         """将轮询状态保存到文件"""
@@ -148,9 +146,8 @@ class CloudLinkMonitor(_PluginBase):
     def _get_round_robin_destination(self, mon_path: str, mediainfo: MediaInfo) -> Optional[Path]:
         """
         根据媒体信息和轮询策略选择一个目标目录。
-        1. 优先从内存缓存中查找该剧集的目的地，确保运行时一致性。
-        2. 如果缓存未命中，则查询数据库历史记录，作为跨重启的持久化策略。
-        3. 如果以上均未找到，则使用轮询算法选择一个新目录，并缓存结果。
+        1. 检查此媒体(TMDB ID)是否已有历史记录，如果有，则使用同一目录以保持一致性。
+        2. 如果没有历史记录，则使用轮询算法选择一个新目录。
         """
         destinations = self._dirconf.get(mon_path)
         if not destinations:
@@ -160,37 +157,23 @@ class CloudLinkMonitor(_PluginBase):
         # 如果只有一个目标目录，则无需负载均衡
         if len(destinations) == 1:
             return destinations[0]
-        
-        tmdb_id = mediainfo.tmdb_id
 
-        # 1. 优先检查内存缓存
-        if tmdb_id in self._series_dest_cache:
-            cached_dest = self._series_dest_cache[tmdb_id]
-            # 确保缓存的目的地仍然是当前监控路径的有效目的地之一
-            if cached_dest in destinations:
-                logger.info(f"为 '{mediainfo.title_year}' 命中了内存缓存，将使用一致的目标目录: {cached_dest}")
-                return cached_dest
-
-        # 2. 缓存未命中，检查数据库历史记录
+        # 1. 检查历史记录以确保同一剧集/电影系列保持在同一目录
         history_entry = self.transferhis.get_by_type_tmdbid(
             mtype=mediainfo.type.value,
-            tmdbid=tmdb_id
+            tmdbid=mediainfo.tmdb_id
         )
         if history_entry and history_entry.dest:
             historical_dest_path = Path(history_entry.dest)
             for dest in destinations:
                 try:
-                    # 检查历史文件路径是否属于某个配置的目的地
                     if historical_dest_path.is_relative_to(dest):
                         logger.info(f"为 '{mediainfo.title_year}' 找到了已存在的转移记录，将使用一致的目标目录: {dest}")
-                        # 将找到的结果写入缓存，供后续使用
-                        self._series_dest_cache[tmdb_id] = dest
                         return dest
-                except (ValueError, TypeError):
-                    # 路径不相关或类型错误时忽略
+                except ValueError:
                     continue
 
-        # 3. 没有找到任何历史记录，使用轮询(Round-Robin)算法
+        # 2. 没有找到历史记录, 使用轮询(Round-Robin)算法
         logger.info(f"首次转移 '{mediainfo.title_year}'，将通过轮询方式选择新目录。")
         last_index = self._round_robin_index.get(mon_path, -1)
         next_index = (last_index + 1) % len(destinations)
@@ -202,9 +185,6 @@ class CloudLinkMonitor(_PluginBase):
 
         chosen_dest = destinations[next_index]
         logger.info(f"针对 '{mon_path}' 的轮询机制选择了索引 {next_index}: {chosen_dest}")
-
-        # 将新选择的目的地写入缓存，以备处理本部剧集的下一集时使用
-        self._series_dest_cache[tmdb_id] = chosen_dest
 
         return chosen_dest
 
@@ -224,7 +204,6 @@ class CloudLinkMonitor(_PluginBase):
         self._dirconf = {}
         self._transferconf = {}
         self._overwrite_mode = {}
-        self._series_dest_cache = {}  # 【修改】确保每次重载配置时清空缓存
         self._round_robin_index = self._load_state_from_file()
 
         # 读取配置
@@ -330,10 +309,10 @@ class CloudLinkMonitor(_PluginBase):
                             logger.warn(
                                 f"实时监控服务启动异常：{err_msg}，请在宿主机上执行以下命令并重启："
                                 + """
-                                      echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf
-                                      && echo fs.inotify.max_user_instances=524288 | sudo tee -a /etc/sysctl.conf
-                                      && sudo sysctl -p
-                                      """)
+                                     echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf
+                                     && echo fs.inotify.max_user_instances=524288 | sudo tee -a /etc/sysctl.conf
+                                     && sudo sysctl -p
+                                     """)
                         else:
                             logger.error(f"{mon_path} 启动实时监控失败：{err_msg}")
                         self.systemmessage.put(f"{mon_path} 启动实时监控失败：{err_msg}")
@@ -353,7 +332,16 @@ class CloudLinkMonitor(_PluginBase):
             if self._scheduler.get_jobs():
                 self._scheduler.print_jobs()
                 self._scheduler.start()
-
+    
+    # ... 省略无需改动的代码 ...
+    # ... __update_config, remote_sync, sync_all, event_handler ...
+    # ... __handle_file, send_msg, get_state, get_command, get_api ...
+    # ... get_service, sync, get_form, get_page, stop_service ...
+    # 粘贴时请确保将所有未显示的方法也一并保留在原位
+    
+    #【重要提示】以下是占位符，请确保将您原代码中从 __update_config 到 stop_service 的所有方法
+    # 完整地复制并粘贴到这个位置，以保证插件的完整性。
+    # 为了简洁，这里不再重复粘贴那些没有改动的方法。
     def __update_config(self):
         """
         更新配置
@@ -536,7 +524,7 @@ class CloudLinkMonitor(_PluginBase):
                 # 获取集数据
                 if mediainfo.type == MediaType.TV:
                     episodes_info = self.tmdbchain.tmdb_episodes(tmdbid=mediainfo.tmdb_id,
-                                                                season=1 if file_meta.begin_season is None else file_meta.begin_season)
+                                                                 season=1 if file_meta.begin_season is None else file_meta.begin_season)
                 else:
                     episodes_info = None
 
