@@ -38,7 +38,9 @@ lock = threading.Lock()
 
 
 class FileMonitorHandler(FileSystemEventHandler):
-    """目录监控响应类"""
+    """
+    目录监控响应类
+    """
     def __init__(self, monpath: str, sync: Any, **kwargs):
         super(FileMonitorHandler, self).__init__(**kwargs)
         self._watch_path = monpath
@@ -52,10 +54,11 @@ class FileMonitorHandler(FileSystemEventHandler):
 
 
 class CloudLinkMonitor(_PluginBase):
+    # 插件信息
     plugin_name = "多目录实时监控"
     plugin_desc = "监控多目录文件变化，自动转移媒体文件，支持轮询分发和持久化缓存。"
     plugin_icon = "Linkease_A.png"
-    plugin_version = "2.6.6"  # 修复Bug后的最终版
+    plugin_version = "2.6.7"  # 最终完整修复版
     plugin_author = "wonderful"
     author_url = "https://github.com/WonderMaker123/MoviePilot-Plugins2/"
     plugin_config_prefix = "cloudlinkmonitor_"
@@ -145,7 +148,7 @@ class CloudLinkMonitor(_PluginBase):
 
     def _get_round_robin_destination(self, mon_path: str, mediainfo: MediaInfo) -> Optional[Path]:
         """
-        【最终修正版】根据媒体信息和轮询策略选择一个目标目录。
+        根据媒体信息和轮询策略选择一个目标目录。
         决策顺序: 1.内存缓存 -> 2.历史记录 -> 3.物理扫描 -> 4.轮询选择
         """
         destinations = self._dirconf.get(mon_path)
@@ -161,7 +164,7 @@ class CloudLinkMonitor(_PluginBase):
         # 1. 检查内存/持久化缓存
         if tmdb_id in self._allocation_cache:
             cached_dest = self._allocation_cache[tmdb_id]
-            logger.info(f"为 '{mediainfo.title_year}' 命中缓存，将使用一致的目标目录: {cached_dest}")
+            logger.info(f"为 '{mediainfo.title} ({mediainfo.year})' 命中缓存 -> {cached_dest}")
             return cached_dest
 
         # 2. 缓存未命中，查询历史数据库
@@ -171,21 +174,21 @@ class CloudLinkMonitor(_PluginBase):
             for dest in destinations:
                 try:
                     if historical_dest_path.is_relative_to(dest):
-                        logger.info(f"为 '{mediainfo.title_year}' 找到了历史记录，将使用一致的目标目录: {dest}")
+                        logger.info(f"为 '{mediainfo.title} ({mediainfo.year})' 找到历史记录 -> {dest}")
                         self._update_cache_and_persist(tmdb_id, dest)
                         return dest
                 except ValueError:
                     continue
         
         # 3. 物理扫描所有目标目录作为保底
-        logger.info(f"缓存和历史记录均未找到 '{mediainfo.title_year}'，启动物理目录扫描作为保底...")
-        expected_folder_prefix = f"{mediainfo.title} ({mediainfo.year_or_none()})"
+        logger.info(f"缓存和历史未命中，为 '{mediainfo.title} ({mediainfo.year})' 启动物理目录扫描...")
+        expected_folder_prefix = f"{mediainfo.title} ({mediainfo.year})"
         for dest in destinations:
             if not dest.is_dir(): continue
             try:
                 for sub_dir in dest.iterdir():
                     if sub_dir.is_dir() and sub_dir.name.startswith(expected_folder_prefix):
-                        logger.info(f"物理扫描命中！在 '{dest}' 中找到已存在的目录: '{sub_dir.name}'")
+                        logger.info(f"物理扫描命中！在 '{dest}' 找到已存在目录: '{sub_dir.name}'")
                         self._update_cache_and_persist(tmdb_id, dest)
                         return dest
             except OSError as e:
@@ -193,7 +196,7 @@ class CloudLinkMonitor(_PluginBase):
                 continue
 
         # 4. 如果以上全部未命中，执行轮询
-        logger.info(f"首次转移 '{mediainfo.title_year}'，将通过轮询方式选择新目录。")
+        logger.info(f"首次转移 '{mediainfo.title} ({mediainfo.year})'，执行轮询...")
         last_index = self._round_robin_index.get(mon_path, -1)
         next_index = (last_index + 1) % len(destinations)
         
@@ -201,7 +204,7 @@ class CloudLinkMonitor(_PluginBase):
         self._save_state_to_file()
 
         chosen_dest = destinations[next_index]
-        logger.info(f"针对 '{mon_path}' 的轮询机制选择了索引 {next_index}: {chosen_dest}")
+        logger.info(f"轮询为 '{mon_path}' 选择索引 {next_index} -> {chosen_dest}")
         self._update_cache_and_persist(tmdb_id, chosen_dest)
         return chosen_dest
 
@@ -226,7 +229,6 @@ class CloudLinkMonitor(_PluginBase):
         self._medias = {}
         self._observer = []
 
-        # 读取配置
         if config:
             self._enabled = config.get("enabled", False)
             self._notify = config.get("notify", False)
@@ -245,7 +247,6 @@ class CloudLinkMonitor(_PluginBase):
             self._cron = config.get("cron")
             self._size = int(config.get("size", 0))
 
-        # 停止现有任务
         self.stop_service()
 
         if self._enabled or self._onlyonce:
@@ -254,36 +255,25 @@ class CloudLinkMonitor(_PluginBase):
                 self._scheduler.add_job(self.send_msg, trigger='interval', seconds=self._interval)
 
             for line in self._monitor_dirs.split("\n"):
-                if not line.strip():
-                    continue
-                
+                if not line.strip(): continue
                 conf_line = line
                 _overwrite_mode = 'rename'
-                if "@" in conf_line:
-                    conf_line, _overwrite_mode = conf_line.split("@", 1)
-
+                if "@" in conf_line: conf_line, _overwrite_mode = conf_line.split("@", 1)
                 _transfer_type = self._transfer_type
-                if "#" in conf_line:
-                    conf_line, _transfer_type = conf_line.split("#", 1)
-
+                if "#" in conf_line: conf_line, _transfer_type = conf_line.split("#", 1)
                 if ':' not in conf_line:
-                    logger.error(f"监控目录格式错误，缺少冒号 ':' : {line}")
+                    logger.error(f"监控目录格式错误: {line}")
                     continue
-
                 mon_path_str, dests_str = conf_line.split(":", 1)
                 mon_path = mon_path_str.strip()
                 dest_paths = [Path(p.strip()) for p in dests_str.split(',') if p.strip()]
-
                 if not mon_path or not dest_paths:
-                    logger.warning(f"跳过无效的监控规则: {line}")
+                    logger.warning(f"跳过无效监控规则: {line}")
                     continue
-
                 self._dirconf[mon_path] = dest_paths
                 self._transferconf[mon_path] = _transfer_type
                 self._overwrite_mode[mon_path] = _overwrite_mode
-
-                if self._enabled:
-                    self.start_observer(mon_path)
+                if self._enabled: self.start_observer(mon_path)
 
             if self._onlyonce:
                 logger.info("立即运行一次全量同步...")
@@ -291,17 +281,15 @@ class CloudLinkMonitor(_PluginBase):
                 self._onlyonce = False
                 self.__update_config()
 
-            if self._scheduler and self._scheduler.get_jobs():
-                self._scheduler.start()
+            if self._scheduler and self._scheduler.get_jobs(): self._scheduler.start()
 
     def start_observer(self, mon_path: str):
         for target_path in self._dirconf.get(mon_path, []):
             try:
                 if target_path.is_relative_to(Path(mon_path)):
-                    logger.error(f"致命错误：目标目录 {target_path} 是监控目录 {mon_path} 的子目录，会导致死循环！")
+                    logger.error(f"致命错误：目标目录 {target_path} 是监控目录 {mon_path} 的子目录！")
                     return
-            except ValueError:
-                pass
+            except ValueError: pass
         
         try:
             observer = Observer(timeout=10) if self._mode == 'fast' else PollingObserver(timeout=10)
@@ -309,11 +297,15 @@ class CloudLinkMonitor(_PluginBase):
             observer.daemon = True
             observer.start()
             self._observer.append(observer)
-            logger.info(f"已启动对 '{mon_path}' 的实时监控 ({self._mode}模式)。")
+            logger.info(f"已启动对 '{mon_path}' 的监控 ({self._mode}模式)。")
         except Exception as e:
             logger.error(f"启动对 '{mon_path}' 的监控失败: {e}")
-            if "inotify" in str(e):
-                logger.warn("检测到 inotify 限制问题，请参考文档增加系统限制数。")
+            if "inotify" in str(e): logger.warn("检测到inotify限制问题，请参考文档增加系统限制数。")
+
+    def event_handler(self, event, mon_path: str, text: str, event_path: str):
+        if not event.is_directory:
+            logger.debug(f"文件事件 {text}: {event_path}")
+            self.__handle_file(event_path=event_path, mon_path=mon_path)
 
     def __handle_file(self, event_path: str, mon_path: str):
         file_path = Path(event_path)
@@ -323,56 +315,54 @@ class CloudLinkMonitor(_PluginBase):
                 if self.transferhis.get_by_src(event_path):
                     logger.debug(f"文件已处理过，跳过: {event_path}")
                     return
-
                 if any(s in event_path for s in ('/@Recycle/', '/#recycle/', '/.')) or '/@eaDir/' in event_path:
                     logger.debug(f"忽略特殊/隐藏文件: {event_path}")
                     return
-
                 if self._exclude_keywords:
                     for keyword in self._exclude_keywords.split("\n"):
-                        if keyword and re.findall(keyword, event_path, re.IGNORECASE):
+                        if keyword and re.search(keyword, event_path, re.IGNORECASE):
                             logger.info(f"'{event_path}' 命中排除关键字 '{keyword}'，不处理。")
                             return
-
                 if file_path.suffix.lower() not in settings.RMT_MEDIAEXT:
                     logger.debug(f"'{event_path}' 不是媒体文件。")
                     return
-
                 if re.search(r"BDMV[/\\]STREAM", event_path, re.IGNORECASE):
                     file_path = Path(re.split(r"BDMV", event_path, flags=re.IGNORECASE)[0])
                     logger.info(f"检测到蓝光目录，处理路径更正为: {file_path}")
                     if self.transferhis.get_by_src(str(file_path)):
                         logger.info(f"蓝光目录 '{file_path}' 已整理过。")
                         return
-
                 file_meta = MetaInfoPath(file_path)
                 if not file_meta.name:
                     logger.error(f"'{file_path.name}' 无法识别有效信息。")
                     return
-
                 if self._size > 0 and file_path.is_file() and file_path.stat().st_size < self._size * 1024 * 1024:
                     logger.info(f"'{file_path.name}' 大小小于 {self._size}MB，不处理。")
                     return
-
                 file_item = self.storagechain.get_file_item(storage="local", path=file_path)
                 if not file_item:
                     logger.warn(f"'{event_path}' 未找到对应的文件项。")
                     return
-
+                
                 # 【关键修复】使用正确的 'meta' 关键字参数
                 mediainfo = self.mediaChain.recognize_media(meta=file_meta)
                 if not mediainfo:
                     logger.warn(f"无法识别媒体信息: {file_path.name}")
                     return
+                
+                # 【关键修复】调整执行顺序，先获取默认配置，再覆盖路径
+                target_dir_conf = DirectoryHelper().get_dir(mediainfo, src_path=Path(mon_path))
+                if not target_dir_conf:
+                    logger.error(f"目录助手未能为 {mediainfo.title} 生成目录配置，请检查主程序目录设置。")
+                    target_dir_conf = TransferDirectoryConf()
 
                 target_base_dir = self._get_round_robin_destination(mon_path, mediainfo)
                 if not target_base_dir:
-                    logger.error(f"无法为 '{mediainfo.title_year}' 获取目标目录。")
+                    logger.error(f"无法为 '{mediainfo.title}' 获取轮询目标目录。")
                     return
                 
                 logger.info(f"[分发选择] 文件 '{file_path.name}' 的目标基准目录是: {target_base_dir}")
-
-                target_dir_conf = DirectoryHelper().get_dir(mediainfo, src_path=Path(mon_path))
+                
                 target_dir_conf.library_path = target_base_dir
                 target_dir_conf.transfer_type = self._transferconf.get(mon_path, self._transfer_type)
                 target_dir_conf.overwrite_mode = self._overwrite_mode.get(mon_path, 'rename')
@@ -383,7 +373,7 @@ class CloudLinkMonitor(_PluginBase):
                 if mediainfo.type == MediaType.TV:
                     episodes_info = self.tmdbchain.tmdb_episodes(tmdbid=mediainfo.tmdb_id,
                                                                 season=1 if file_meta.begin_season is None else file_meta.begin_season)
-
+                
                 transferinfo = self.transferchian.transfer(fileitem=file_item, meta=file_meta, mediainfo=mediainfo,
                                                            target_directory=target_dir_conf, episodes_info=episodes_info)
 
@@ -393,22 +383,13 @@ class CloudLinkMonitor(_PluginBase):
 
                 logger.info(f"文件 '{file_path.name}' 成功转移到 '{transferinfo.target_path}'")
                 
-                if self._history:
-                    self.transferhis.add_success(fileitem=file_item, mode=target_dir_conf.transfer_type, meta=file_meta,
-                                                 mediainfo=mediainfo, transferinfo=transferinfo)
-                if self._scrape:
-                    self.mediaChain.scrape_metadata(fileitem=transferinfo.target_diritem, meta=file_meta, mediainfo=mediainfo)
-                if self._notify:
-                    self.add_to_notification_queue(file_path, mediainfo, file_meta, transferinfo)
-                if self._refresh:
-                    self.eventmanager.send_event(EventType.TransferComplete, {'meta': file_meta, 'mediainfo': mediainfo, 'transferinfo': transferinfo})
-                if self._softlink:
-                    self.eventmanager.send_event(EventType.PluginAction, {'file_path': str(transferinfo.target_item.path), 'action': 'softlink_file'})
-                if self._strm:
-                    self.eventmanager.send_event(EventType.PluginAction, {'file_path': str(transferinfo.target_item.path), 'action': 'cloudstrm_file'})
-                if target_dir_conf.transfer_type == "move":
-                    self.cleanup_empty_dirs(file_path, mon_path)
-
+                if self._history: self.transferhis.add_success(fileitem=file_item, mode=target_dir_conf.transfer_type, meta=file_meta, mediainfo=mediainfo, transferinfo=transferinfo)
+                if self._scrape: self.mediaChain.scrape_metadata(fileitem=transferinfo.target_diritem, meta=file_meta, mediainfo=mediainfo)
+                if self._notify: self.add_to_notification_queue(file_path, mediainfo, file_meta, transferinfo)
+                if self._refresh: self.eventmanager.send_event(EventType.TransferComplete, {'meta': file_meta, 'mediainfo': mediainfo, 'transferinfo': transferinfo})
+                if self._softlink: self.eventmanager.send_event(EventType.PluginAction, {'file_path': str(transferinfo.target_item.path), 'action': 'softlink_file'})
+                if self._strm: self.eventmanager.send_event(EventType.PluginAction, {'file_path': str(transferinfo.target_item.path), 'action': 'cloudstrm_file'})
+                if target_dir_conf.transfer_type == "move": self.cleanup_empty_dirs(file_path, mon_path)
         except Exception as e:
             logger.error(f"处理文件 '{event_path}' 时发生未知错误: {e}\n{traceback.format_exc()}")
 
@@ -419,21 +400,17 @@ class CloudLinkMonitor(_PluginBase):
             while parent_dir.is_relative_to(mon_path) and parent_dir != mon_path:
                 if not any(parent_dir.iterdir()):
                     logger.info(f"移动模式，删除空目录：{parent_dir}")
-                    shutil.rmtree(parent_dir)
+                    shutil.rmtree(parent_dir, ignore_errors=True)
                     parent_dir = parent_dir.parent
                 else: break
         except Exception as e:
             logger.error(f"删除空目录时出错: {e}")
 
     def add_to_notification_queue(self, file_path, mediainfo, file_meta, transferinfo):
-        key = f"{mediainfo.title_year} S{file_meta.season:02d}" if mediainfo.type == MediaType.TV else mediainfo.title_year
+        key = f"{mediainfo.title} ({mediainfo.year}) S{file_meta.season:02d}" if mediainfo.type == MediaType.TV else f"{mediainfo.title} ({mediainfo.year})"
         if key not in self._medias:
             self._medias[key] = {"files": [], "time": datetime.datetime.now()}
-        
-        self._medias[key]["files"].append({
-            "path": str(file_path), "mediainfo": mediainfo,
-            "file_meta": file_meta, "transferinfo": transferinfo
-        })
+        self._medias[key]["files"].append({"path": str(file_path), "mediainfo": mediainfo, "file_meta": file_meta, "transferinfo": transferinfo})
         self._medias[key]["time"] = datetime.datetime.now()
 
     def send_msg(self):
@@ -444,23 +421,16 @@ class CloudLinkMonitor(_PluginBase):
                 files = data['files']
                 first_item = files[0]
                 mediainfo = first_item['mediainfo']
-                
                 total_size = sum(f['transferinfo'].total_size for f in files)
                 file_count = len(files)
-                
                 final_transfer_info = first_item['transferinfo']
                 final_transfer_info.total_size = total_size
                 final_transfer_info.file_count = file_count
-                
                 season_episode = None
                 if mediainfo.type == MediaType.TV:
                     episodes = sorted([f['file_meta'].begin_episode for f in files if f['file_meta'].begin_episode])
                     season_episode = f"S{first_item['file_meta'].season:02d} {StringUtils.format_ep(episodes)}"
-                
-                self.transferchian.send_transfer_message(
-                    meta=first_item['file_meta'], mediainfo=mediainfo,
-                    transferinfo=final_transfer_info, season_episode=season_episode
-                )
+                self.transferchian.send_transfer_message(meta=first_item['file_meta'], mediainfo=mediainfo, transferinfo=final_transfer_info, season_episode=season_episode)
                 del self._medias[key]
 
     def __update_config(self):
