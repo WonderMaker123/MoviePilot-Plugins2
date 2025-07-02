@@ -409,11 +409,12 @@
     "name": "多目录实时监控",
     "description": "监控云盘目录文件变化，自动转移媒体文件。",
     "labels": "云盘,工具",
-    "version": "2.6.6",
+    "version": "2.6.7",
     "icon": "Linkease_A.png",
     "author": "wonderful",
     "level": 1,
     "history": {
+      "v2.6.7": "整理错误3"，
       "v2.6.6": "整理错误3",
       "v2.6.5": "整理错误2",
       "v2.6.4": "整理错误",
