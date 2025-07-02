@@ -55,7 +55,7 @@ class CloudLinkMonitor(_PluginBase):
     plugin_name = "多目录实时监控"
     plugin_desc = "监控多目录文件变化，自动转移媒体文件，支持轮询分发和持久化缓存。"
     plugin_icon = "Linkease_A.png"
-    plugin_version = "2.8.4"  # 终极稳定版
+    plugin_version = "2.8.5"  # 终极稳定版
     plugin_author = "wonderful"
     author_url = "https://github.com/WonderMaker123/MoviePilot-Plugins2/"
     plugin_config_prefix = "cloudlinkmonitor_"
@@ -160,6 +160,7 @@ class CloudLinkMonitor(_PluginBase):
                 except ValueError: continue
         
         logger.info(f"缓存和历史未命中，为 '{mediainfo.title} ({mediainfo.year})' 启动物理目录扫描...")
+        # 【问题修复】将 mediainfo.year_or_none() 修正为 mediainfo.year
         expected_folder_prefix = f"{mediainfo.title} ({mediainfo.year})"
         for dest in destinations:
             if not dest.is_dir(): continue
@@ -314,10 +315,10 @@ class CloudLinkMonitor(_PluginBase):
                 episodes_info = None
                 if mediainfo.type == MediaType.TV:
                     episodes_info = self.tmdbchain.tmdb_episodes(tmdbid=mediainfo.tmdb_id,
-                                                                season=1 if file_meta.begin_season is None else file_meta.begin_season)
+                                                                 season=1 if file_meta.begin_season is None else file_meta.begin_season)
                 
                 transferinfo = self.transferchian.transfer(fileitem=file_item, meta=file_meta, mediainfo=mediainfo,
-                                                           target_directory=target_dir_conf, episodes_info=episodes_info)
+                                                         target_directory=target_dir_conf, episodes_info=episodes_info)
 
                 if not transferinfo or not transferinfo.success:
                     logger.error(f"文件转移失败: {file_path.name} - {transferinfo.message if transferinfo else '未知原因'}")
