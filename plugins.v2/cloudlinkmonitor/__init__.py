@@ -38,41 +38,28 @@ lock = threading.Lock()
 
 
 class FileMonitorHandler(FileSystemEventHandler):
-    """
-    目录监控响应类
-    """
+    """目录监控响应类"""
     def __init__(self, monpath: str, sync: Any, **kwargs):
         super(FileMonitorHandler, self).__init__(**kwargs)
         self._watch_path = monpath
         self.sync = sync
 
     def on_created(self, event):
-        self.sync.event_handler(event=event, text="创建",
-                                mon_path=self._watch_path, event_path=event.src_path)
+        self.sync.event_handler(event=event, text="创建", mon_path=self._watch_path, event_path=event.src_path)
 
     def on_moved(self, event):
-        self.sync.event_handler(event=event, text="移动",
-                                mon_path=self._watch_path, event_path=event.dest_path)
+        self.sync.event_handler(event=event, text="移动", mon_path=self._watch_path, event_path=event.dest_path)
 
 
 class CloudLinkMonitor(_PluginBase):
-    # 插件名称
     plugin_name = "多目录实时监控"
-    # 插件描述
     plugin_desc = "监控多目录文件变化，自动转移媒体文件，支持轮询分发和持久化缓存。"
-    # 插件图标
     plugin_icon = "Linkease_A.png"
-    # 插件版本
-    plugin_version = "2.6.5"
-    # 插件作者
+    plugin_version = "2.6.6"  # 修复Bug后的最终版
     plugin_author = "wonderful"
-    # 作者主页
     author_url = "https://github.com/WonderMaker123/MoviePilot-Plugins2/"
-    # 插件配置项ID前缀
     plugin_config_prefix = "cloudlinkmonitor_"
-    # 加载顺序
     plugin_order = 4
-    # 可使用的用户级别
     auth_level = 1
 
     # --- 私有属性 ---
@@ -126,7 +113,7 @@ class CloudLinkMonitor(_PluginBase):
             with self._state_file.open('r', encoding='utf-8') as f:
                 state = json.load(f)
                 return state if isinstance(state, dict) else {}
-        except (json.JSONDecodeError, Exception) as e:
+        except Exception as e:
             logger.error(f"无法从 {self._state_file} 加载轮询状态: {e}")
             return {}
 
@@ -138,7 +125,7 @@ class CloudLinkMonitor(_PluginBase):
                 serializable_cache = {tmdb_id: str(path) for tmdb_id, path in self._allocation_cache.items()}
                 json.dump(serializable_cache, f, ensure_ascii=False, indent=4)
         except Exception as e:
-            logger.error(f"无法保存在途缓存到文件 {self._cache_file}: {e}")
+            logger.error(f"无法保存分配缓存到文件 {self._cache_file}: {e}")
 
     def _load_cache_from_file(self) -> Dict[int, Path]:
         """从文件加载分配缓存"""
@@ -147,8 +134,8 @@ class CloudLinkMonitor(_PluginBase):
             with self._cache_file.open('r', encoding='utf-8') as f:
                 loaded_data = json.load(f)
                 return {int(tmdb_id): Path(path) for tmdb_id, path in loaded_data.items()}
-        except (json.JSONDecodeError, Exception) as e:
-            logger.error(f"无法从 {self._cache_file} 加载在途缓存: {e}")
+        except Exception as e:
+            logger.error(f"无法从 {self._cache_file} 加载分配缓存: {e}")
             return {}
 
     def _update_cache_and_persist(self, tmdb_id: int, dest: Path):
@@ -158,8 +145,8 @@ class CloudLinkMonitor(_PluginBase):
 
     def _get_round_robin_destination(self, mon_path: str, mediainfo: MediaInfo) -> Optional[Path]:
         """
-        根据媒体信息和轮询策略选择一个目标目录。
-        【最终保底版逻辑】: 1.内存缓存 -> 2.历史记录 -> 3.物理扫描 -> 4.轮询选择
+        【最终修正版】根据媒体信息和轮询策略选择一个目标目录。
+        决策顺序: 1.内存缓存 -> 2.历史记录 -> 3.物理扫描 -> 4.轮询选择
         """
         destinations = self._dirconf.get(mon_path)
         if not destinations:
@@ -236,6 +223,8 @@ class CloudLinkMonitor(_PluginBase):
         self._overwrite_mode = {}
         self._round_robin_index = self._load_state_from_file()
         self._allocation_cache = self._load_cache_from_file()
+        self._medias = {}
+        self._observer = []
 
         # 读取配置
         if config:
@@ -264,7 +253,6 @@ class CloudLinkMonitor(_PluginBase):
             if self._notify:
                 self._scheduler.add_job(self.send_msg, trigger='interval', seconds=self._interval)
 
-            # 解析监控目录配置
             for line in self._monitor_dirs.split("\n"):
                 if not line.strip():
                     continue
@@ -286,8 +274,8 @@ class CloudLinkMonitor(_PluginBase):
                 mon_path = mon_path_str.strip()
                 dest_paths = [Path(p.strip()) for p in dests_str.split(',') if p.strip()]
 
-                if not dest_paths:
-                    logger.warning(f"监控目录 {mon_path} 未配置有效的目标目录。")
+                if not mon_path or not dest_paths:
+                    logger.warning(f"跳过无效的监控规则: {line}")
                     continue
 
                 self._dirconf[mon_path] = dest_paths
@@ -311,7 +299,6 @@ class CloudLinkMonitor(_PluginBase):
             try:
                 if target_path.is_relative_to(Path(mon_path)):
                     logger.error(f"致命错误：目标目录 {target_path} 是监控目录 {mon_path} 的子目录，会导致死循环！")
-                    self.systemmessage.put(f"监控服务启动失败：{mon_path} 的目标目录是其子目录。")
                     return
             except ValueError:
                 pass
@@ -325,20 +312,13 @@ class CloudLinkMonitor(_PluginBase):
             logger.info(f"已启动对 '{mon_path}' 的实时监控 ({self._mode}模式)。")
         except Exception as e:
             logger.error(f"启动对 '{mon_path}' 的监控失败: {e}")
-            self.systemmessage.put(f"启动监控 '{mon_path}' 失败: {e}")
             if "inotify" in str(e):
                 logger.warn("检测到 inotify 限制问题，请参考文档增加系统限制数。")
-
-    def event_handler(self, event, mon_path: str, text: str, event_path: str):
-        if not event.is_directory:
-            logger.debug(f"文件事件 {text}: {event_path}")
-            self.__handle_file(event_path=event_path, mon_path=mon_path)
 
     def __handle_file(self, event_path: str, mon_path: str):
         file_path = Path(event_path)
         try:
             if not file_path.exists(): return
-
             with lock:
                 if self.transferhis.get_by_src(event_path):
                     logger.debug(f"文件已处理过，跳过: {event_path}")
@@ -379,14 +359,15 @@ class CloudLinkMonitor(_PluginBase):
                     logger.warn(f"'{event_path}' 未找到对应的文件项。")
                     return
 
-                mediainfo = self.mediaChain.recognize_media(path=file_meta)
+                # 【关键修复】使用正确的 'meta' 关键字参数
+                mediainfo = self.mediaChain.recognize_media(meta=file_meta)
                 if not mediainfo:
                     logger.warn(f"无法识别媒体信息: {file_path.name}")
                     return
 
                 target_base_dir = self._get_round_robin_destination(mon_path, mediainfo)
                 if not target_base_dir:
-                    logger.error(f"无法为 {mediainfo.title_year} 获取目标目录。")
+                    logger.error(f"无法为 '{mediainfo.title_year}' 获取目标目录。")
                     return
                 
                 logger.info(f"[分发选择] 文件 '{file_path.name}' 的目标基准目录是: {target_base_dir}")
@@ -415,28 +396,22 @@ class CloudLinkMonitor(_PluginBase):
                 if self._history:
                     self.transferhis.add_success(fileitem=file_item, mode=target_dir_conf.transfer_type, meta=file_meta,
                                                  mediainfo=mediainfo, transferinfo=transferinfo)
-
                 if self._scrape:
                     self.mediaChain.scrape_metadata(fileitem=transferinfo.target_diritem, meta=file_meta, mediainfo=mediainfo)
-
                 if self._notify:
                     self.add_to_notification_queue(file_path, mediainfo, file_meta, transferinfo)
-
                 if self._refresh:
                     self.eventmanager.send_event(EventType.TransferComplete, {'meta': file_meta, 'mediainfo': mediainfo, 'transferinfo': transferinfo})
-
                 if self._softlink:
                     self.eventmanager.send_event(EventType.PluginAction, {'file_path': str(transferinfo.target_item.path), 'action': 'softlink_file'})
-
                 if self._strm:
                     self.eventmanager.send_event(EventType.PluginAction, {'file_path': str(transferinfo.target_item.path), 'action': 'cloudstrm_file'})
-
                 if target_dir_conf.transfer_type == "move":
                     self.cleanup_empty_dirs(file_path, mon_path)
 
         except Exception as e:
             logger.error(f"处理文件 '{event_path}' 时发生未知错误: {e}\n{traceback.format_exc()}")
-            
+
     def cleanup_empty_dirs(self, file_path: Path, mon_path_str: str):
         try:
             parent_dir = file_path.parent
@@ -446,11 +421,10 @@ class CloudLinkMonitor(_PluginBase):
                     logger.info(f"移动模式，删除空目录：{parent_dir}")
                     shutil.rmtree(parent_dir)
                     parent_dir = parent_dir.parent
-                else:
-                    break
+                else: break
         except Exception as e:
             logger.error(f"删除空目录时出错: {e}")
-            
+
     def add_to_notification_queue(self, file_path, mediainfo, file_meta, transferinfo):
         key = f"{mediainfo.title_year} S{file_meta.season:02d}" if mediainfo.type == MediaType.TV else mediainfo.title_year
         if key not in self._medias:
