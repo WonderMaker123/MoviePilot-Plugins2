@@ -55,19 +55,17 @@ class CloudLinkMonitor(_PluginBase):
     plugin_name = "多目录实时监控"
     plugin_desc = "监控多目录文件变化，自动转移媒体文件，支持轮询分发和持久化缓存。"
     plugin_icon = "Linkease_A.png"
-    plugin_version = "2.8.3"  # 修复语法错误
+    plugin_version = "2.8.4"  # 终极稳定版
     plugin_author = "wonderful"
     author_url = "https://github.com/WonderMaker123/MoviePilot-Plugins2/"
     plugin_config_prefix = "cloudlinkmonitor_"
     plugin_order = 4
     auth_level = 1
 
-    # --- 私有属性 ---
     _scheduler: Optional[BackgroundScheduler] = None
     _observer: List[Observer] = []
     _event = threading.Event()
     
-    # 插件配置
     _enabled = False
     _notify = False
     _onlyonce = False
@@ -85,13 +83,11 @@ class CloudLinkMonitor(_PluginBase):
     _exclude_keywords: str = ""
     _interval: int = 10
 
-    # 核心逻辑状态
     _dirconf: Dict[str, List[Path]] = {}
     _transferconf: Dict[str, str] = {}
     _overwrite_mode: Dict[str, str] = {}
     _medias: Dict[str, Any] = {}
     
-    # 持久化状态
     _state_file: Optional[Path] = None
     _cache_file: Optional[Path] = None
     _round_robin_index: Dict[str, int] = {}
@@ -353,7 +349,8 @@ class CloudLinkMonitor(_PluginBase):
             logger.error(f"删除空目录时出错: {e}")
             
     def add_to_notification_queue(self, file_path, mediainfo, file_meta, transferinfo):
-        key = f"{mediainfo.title} ({mediainfo.year}) S{file_meta.season:02d}" if mediainfo.type == MediaType.TV else f"{mediainfo.title} ({mediainfo.year})"
+        # 【关键修复】将 file_meta.season 转换为整数
+        key = f"{mediainfo.title} ({mediainfo.year}) S{int(file_meta.season):02d}" if mediainfo.type == MediaType.TV else f"{mediainfo.title} ({mediainfo.year})"
         if key not in self._medias:
             self._medias[key] = {"files": [], "time": datetime.datetime.now()}
         self._medias[key]["files"].append({"path": str(file_path), "mediainfo": mediainfo, "file_meta": file_meta, "transferinfo": transferinfo})
@@ -375,7 +372,8 @@ class CloudLinkMonitor(_PluginBase):
                 season_episode = None
                 if mediainfo.type == MediaType.TV:
                     episodes = sorted([f['file_meta'].begin_episode for f in files if f['file_meta'].begin_episode])
-                    season_episode = f"S{first_item['file_meta'].season:02d} {StringUtils.format_ep(episodes)}"
+                    # 【关键修复】将 file_meta.season 转换为整数
+                    season_episode = f"S{int(first_item['file_meta'].season):02d} {StringUtils.format_ep(episodes)}"
                 self.transferchian.send_transfer_message(meta=first_item['file_meta'], mediainfo=mediainfo, transferinfo=final_transfer_info, season_episode=season_episode)
                 del self._medias[key]
 
@@ -434,6 +432,7 @@ class CloudLinkMonitor(_PluginBase):
                             '【多目标轮询】: /监控目录:/目标1,/目标2,/目标3\n'
                             '【自定义转移】: /监控目录:/目标目录#转移方式 (例如 #move)\n'
                             '【自定义覆盖】: /监控目录:/目标目录@覆盖方式 (例如 @rename)')
+        # 【关键修复】确保 return 的是元组 (Tuple)
         return ([{'component': 'VForm', 'content': [
             {'component': 'VRow', 'content': [
                 {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'enabled', 'label': '启用插件'}}]},
