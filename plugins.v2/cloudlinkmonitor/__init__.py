@@ -63,7 +63,7 @@ class CloudLinkMonitor(_PluginBase):
     # 插件图标
     plugin_icon = "Linkease_A.png"
     # 插件版本
-    plugin_version = "2.6.4"
+    plugin_version = "2.6.5"
     # 插件作者
     plugin_author = "wonderful"
     # 作者主页
@@ -379,7 +379,7 @@ class CloudLinkMonitor(_PluginBase):
                     logger.warn(f"'{event_path}' 未找到对应的文件项。")
                     return
 
-                mediainfo = self.mediaChain.recognize_media(path=file_path)
+                mediainfo = self.mediaChain.recognize_media(path=file_meta)
                 if not mediainfo:
                     logger.warn(f"无法识别媒体信息: {file_path.name}")
                     return
