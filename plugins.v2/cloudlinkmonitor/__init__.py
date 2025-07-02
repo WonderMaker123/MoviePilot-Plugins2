@@ -55,7 +55,7 @@ class CloudLinkMonitor(_PluginBase):
     plugin_name = "多目录实时监控"
     plugin_desc = "监控多目录文件变化，自动转移媒体文件，支持轮询分发和持久化缓存。"
     plugin_icon = "Linkease_A.png"
-    plugin_version = "2.8.5"  # 终极稳定版
+    plugin_version = "2.8.6"  # 终极稳定版
     plugin_author = "wonderful"
     author_url = "https://github.com/WonderMaker123/MoviePilot-Plugins2/"
     plugin_config_prefix = "cloudlinkmonitor_"
@@ -160,7 +160,6 @@ class CloudLinkMonitor(_PluginBase):
                 except ValueError: continue
         
         logger.info(f"缓存和历史未命中，为 '{mediainfo.title} ({mediainfo.year})' 启动物理目录扫描...")
-        # 【问题修复】将 mediainfo.year_or_none() 修正为 mediainfo.year
         expected_folder_prefix = f"{mediainfo.title} ({mediainfo.year})"
         for dest in destinations:
             if not dest.is_dir(): continue
@@ -350,8 +349,14 @@ class CloudLinkMonitor(_PluginBase):
             logger.error(f"删除空目录时出错: {e}")
             
     def add_to_notification_queue(self, file_path, mediainfo, file_meta, transferinfo):
-        # 【关键修复】将 file_meta.season 转换为整数
-        key = f"{mediainfo.title} ({mediainfo.year}) S{int(file_meta.season):02d}" if mediainfo.type == MediaType.TV else f"{mediainfo.title} ({mediainfo.year})"
+        if mediainfo.type == MediaType.TV:
+            season_num_match = re.search(r'\d+', str(file_meta.season))
+            # Fallback to 1 if no number is found in the season string
+            season_num = int(season_num_match.group(0)) if season_num_match else 1
+            key = f"{mediainfo.title} ({mediainfo.year}) S{season_num:02d}"
+        else:
+            key = f"{mediainfo.title} ({mediainfo.year})"
+
         if key not in self._medias:
             self._medias[key] = {"files": [], "time": datetime.datetime.now()}
         self._medias[key]["files"].append({"path": str(file_path), "mediainfo": mediainfo, "file_meta": file_meta, "transferinfo": transferinfo})
@@ -373,8 +378,10 @@ class CloudLinkMonitor(_PluginBase):
                 season_episode = None
                 if mediainfo.type == MediaType.TV:
                     episodes = sorted([f['file_meta'].begin_episode for f in files if f['file_meta'].begin_episode])
-                    # 【关键修复】将 file_meta.season 转换为整数
-                    season_episode = f"S{int(first_item['file_meta'].season):02d} {StringUtils.format_ep(episodes)}"
+                    season_num_match = re.search(r'\d+', str(first_item['file_meta'].season))
+                    # Fallback to 1 if no number is found in the season string
+                    season_num = int(season_num_match.group(0)) if season_num_match else 1
+                    season_episode = f"S{season_num:02d} {StringUtils.format_ep(episodes)}"
                 self.transferchian.send_transfer_message(meta=first_item['file_meta'], mediainfo=mediainfo, transferinfo=final_transfer_info, season_episode=season_episode)
                 del self._medias[key]
 
@@ -433,7 +440,6 @@ class CloudLinkMonitor(_PluginBase):
                             '【多目标轮询】: /监控目录:/目标1,/目标2,/目标3\n'
                             '【自定义转移】: /监控目录:/目标目录#转移方式 (例如 #move)\n'
                             '【自定义覆盖】: /监控目录:/目标目录@覆盖方式 (例如 @rename)')
-        # 【关键修复】确保 return 的是元组 (Tuple)
         return ([{'component': 'VForm', 'content': [
             {'component': 'VRow', 'content': [
                 {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'enabled', 'label': '启用插件'}}]},
