@@ -55,7 +55,7 @@ class CloudLinkMonitor(_PluginBase):
     plugin_name = "多目录实时监控"
     plugin_desc = "监控多目录文件变化，自动转移媒体文件，支持轮询分发和持久化缓存。"
     plugin_icon = "Linkease_A.png"
-    plugin_version = "2.8.7"  # 终极稳定版 (增加并发锁)
+    plugin_version = "2.9.0"  # 整合目录助手逻辑，最终稳定版
     plugin_author = "wonderful"
     author_url = "https://github.com/WonderMaker123/MoviePilot-Plugins2/"
     plugin_config_prefix = "cloudlinkmonitor_"
@@ -138,7 +138,7 @@ class CloudLinkMonitor(_PluginBase):
         self._save_cache_to_file()
 
     def _get_round_robin_destination(self, mon_path: str, mediainfo: MediaInfo) -> Optional[Path]:
-        # 【修复】使用 with 语句包裹整个函数，实现自动加锁和解锁，防止并发冲突
+        # 使用 with 语句包裹整个函数，实现自动加锁和解锁，防止并发冲突
         with self._destination_lock:
             destinations = self._dirconf.get(mon_path)
             if not destinations:
@@ -189,7 +189,7 @@ class CloudLinkMonitor(_PluginBase):
             return chosen_dest
 
     def init_plugin(self, config: dict = None):
-        # 【修复】初始化并发锁
+        # 初始化并发锁
         self._destination_lock = threading.Lock()
         
         self.transferhis = TransferHistoryOper()
@@ -301,24 +301,39 @@ class CloudLinkMonitor(_PluginBase):
                     logger.warn(f"无法识别媒体信息: {file_path.name}")
                     return
 
-                target_dir_conf = DirectoryHelper().get_dir(mediainfo, src_path=Path(mon_path))
-                if not target_dir_conf:
-                    logger.warning(f"目录助手未能为 '{mediainfo.title}' 生成目录配置，将使用默认配置。")
-                    target_dir_conf = TransferDirectoryConf()
-
+                # 【最终修复】整合目录助手逻辑
+                # 1. 首先确定轮询的目标盘（根目录）
                 target_base_dir = self._get_round_robin_destination(mon_path, mediainfo)
                 if not target_base_dir:
                     logger.error(f"无法为 '{mediainfo.title}' 获取轮询目标目录。")
                     return
                 
-                logger.info(f"[分发选择] 文件 '{file_path.name}' 的目标基准目录是: {target_base_dir}")
-                
+                # 2. 然后向主程序的目录助手请求目录结构配置
+                target_dir_conf = DirectoryHelper().get_dir(mediainfo, src_path=Path(mon_path))
+
+                # 3. 判断目录助手是否返回了有效的配置
+                if not target_dir_conf:
+                    logger.warning(f"目录助手未能为 '{mediainfo.title}' 生成目录配置，将使用插件的默认后备设置。")
+                    # 如果助手失败，则手动创建一个配置对象
+                    target_dir_conf = TransferDirectoryConf()
+                    target_dir_conf.library_category_folder = self._category
+                    target_dir_conf.scraping = self._scrape
+                    # 关键：手动设置重命名为True，这通常会触发标准文件夹结构的创建
+                    target_dir_conf.renaming = True 
+                else:
+                    logger.info(f"目录助手成功为 '{mediainfo.title}' 生成目录配置。")
+                    # 如果助手成功，我们也需要确保刮削设置与插件设置一致
+                    target_dir_conf.scraping = self._scrape
+
+                # 4. 无论助手是否成功，都将轮询选出的目标盘符作为最终的根路径
                 target_dir_conf.library_path = target_base_dir
+                
+                # 5. 无论助手是否成功，都使用插件自身定义的转移方式和覆盖模式
                 target_dir_conf.transfer_type = self._transferconf.get(mon_path, self._transfer_type)
                 target_dir_conf.overwrite_mode = self._overwrite_mode.get(mon_path, 'rename')
-                target_dir_conf.scraping = self._scrape
-                target_dir_conf.library_category_folder = self._category
-                
+
+                logger.info(f"[分发选择] 文件 '{file_path.name}' 的目标基准目录是: {target_dir_conf.library_path}")
+
                 episodes_info = None
                 if mediainfo.type == MediaType.TV:
                     episodes_info = self.tmdbchain.tmdb_episodes(tmdbid=mediainfo.tmdb_id,
@@ -334,7 +349,7 @@ class CloudLinkMonitor(_PluginBase):
                 logger.info(f"文件 '{file_path.name}' 成功转移到 '{transferinfo.target_item.path}'")
                 
                 if self._history: self.transferhis.add_success(fileitem=file_item, mode=target_dir_conf.transfer_type, meta=file_meta, mediainfo=mediainfo, transferinfo=transferinfo)
-                if self._scrape: self.mediaChain.scrape_metadata(fileitem=transferinfo.target_diritem, meta=file_meta, mediainfo=mediainfo)
+                # 注意：刮削操作由转移链根据 target_dir_conf.scraping 的值来决定，这里无需重复调用
                 if self._notify: self.add_to_notification_queue(file_path, mediainfo, file_meta, transferinfo)
                 if self._refresh: self.eventmanager.send_event(EventType.TransferComplete, {'meta': file_meta, 'mediainfo': mediainfo, 'transferinfo': transferinfo})
                 if self._softlink: self.eventmanager.send_event(EventType.PluginAction, {'file_path': str(transferinfo.target_item.path), 'action': 'softlink_file'})
@@ -347,7 +362,7 @@ class CloudLinkMonitor(_PluginBase):
         try:
             parent_dir = file_path.parent
             mon_path = Path(mon_path_str)
-            while parent_dir.is_relative_to(mon_path) and parent_dir != mon_path:
+            while parent_dir != mon_path and str(parent_dir).startswith(mon_path_str):
                 if not any(parent_dir.iterdir()):
                     logger.info(f"移动模式，删除空目录：{parent_dir}")
                     shutil.rmtree(parent_dir, ignore_errors=True)
@@ -358,10 +373,8 @@ class CloudLinkMonitor(_PluginBase):
             
     def add_to_notification_queue(self, file_path, mediainfo, file_meta, transferinfo):
         if mediainfo.type == MediaType.TV:
-            # 确保 file_meta.season 不为 None，然后转换为字符串进行正则搜索
             season_str = str(file_meta.season) if file_meta.season is not None else ''
             season_num_match = re.search(r'\d+', season_str)
-            # 确保备用值是整数 1
             season_num = int(season_num_match.group(0)) if season_num_match else 1
             key = f"{mediainfo.title} ({mediainfo.year}) S{season_num:02d}"
         else:
@@ -388,10 +401,8 @@ class CloudLinkMonitor(_PluginBase):
                 season_episode = None
                 if mediainfo.type == MediaType.TV:
                     episodes = sorted([f['file_meta'].begin_episode for f in files if f['file_meta'].begin_episode])
-                    # 确保 first_item['file_meta'].season 不为 None，然后转换为字符串进行正则搜索
                     season_str = str(first_item['file_meta'].season) if first_item['file_meta'].season is not None else ''
                     season_num_match = re.search(r'\d+', season_str)
-                    # 确保备用值是整数 1
                     season_num = int(season_num_match.group(0)) if season_num_match else 1
                     season_episode = f"S{season_num:02d} {StringUtils.format_ep(episodes)}"
                 self.transferchian.send_transfer_message(meta=first_item['file_meta'], mediainfo=mediainfo, transferinfo=final_transfer_info, season_episode=season_episode)
