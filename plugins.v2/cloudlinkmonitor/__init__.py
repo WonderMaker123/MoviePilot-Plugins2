@@ -38,34 +38,52 @@ lock = threading.Lock()
 
 
 class FileMonitorHandler(FileSystemEventHandler):
-    """目录监控响应类"""
+    """
+    目录监控响应类
+    """
+
     def __init__(self, monpath: str, sync: Any, **kwargs):
         super(FileMonitorHandler, self).__init__(**kwargs)
         self._watch_path = monpath
         self.sync = sync
 
     def on_created(self, event):
-        self.sync.event_handler(event=event, text="创建", mon_path=self._watch_path, event_path=event.src_path)
+        self.sync.event_handler(event=event, text="创建",
+                                mon_path=self._watch_path, event_path=event.src_path)
 
     def on_moved(self, event):
-        self.sync.event_handler(event=event, text="移动", mon_path=self._watch_path, event_path=event.dest_path)
+        self.sync.event_handler(event=event, text="移动",
+                                mon_path=self._watch_path, event_path=event.dest_path)
 
 
 class CloudLinkMonitor(_PluginBase):
+    # 插件名称
     plugin_name = "多目录实时监控"
-    plugin_desc = "监控多目录文件变化，自动转移媒体文件，支持轮询分发和持久化缓存。"
+    # 插件描述
+    plugin_desc = "监控多目录文件变化，自动转移媒体文件，支持轮询分发。"
+    # 插件图标
     plugin_icon = "Linkease_A.png"
-    plugin_version = "2.9.0"  # 整合目录助手逻辑，最终稳定版
+    # 插件版本
+    plugin_version = "2.9.1"  # 版本号提升，体现修复
+    # 插件作者
     plugin_author = "wonderful"
+    # 作者主页
     author_url = "https://github.com/WonderMaker123/MoviePilot-Plugins2/"
+    # 插件配置项ID前缀
     plugin_config_prefix = "cloudlinkmonitor_"
+    # 加载顺序
     plugin_order = 4
+    # 可使用的用户级别
     auth_level = 1
 
-    _scheduler: Optional[BackgroundScheduler] = None
-    _observer: List[Observer] = []
-    _event = threading.Event()
-    
+    # 私有属性
+    _scheduler = None
+    transferhis = None
+    downloadhis = None
+    transferchian = None
+    tmdbchain = None
+    storagechain = None
+    _observer = []
     _enabled = False
     _notify = False
     _onlyonce = False
@@ -75,123 +93,122 @@ class CloudLinkMonitor(_PluginBase):
     _refresh = False
     _softlink = False
     _strm = False
-    _cron: Optional[str] = None
-    _size: int = 0
-    _mode: str = "compatibility"
-    _transfer_type: str = "softlink"
-    _monitor_dirs: str = ""
-    _exclude_keywords: str = ""
+    _cron = None
+    filetransfer = None
+    mediaChain = None
+    _size = 0
+    # 模式 compatibility/fast
+    _mode = "compatibility"
+    # 转移方式
+    _transfer_type = "softlink"
+    _monitor_dirs = ""
+    _exclude_keywords = ""
     _interval: int = 10
-
-    _dirconf: Dict[str, List[Path]] = {}
-    _transferconf: Dict[str, str] = {}
-    _overwrite_mode: Dict[str, str] = {}
-    _medias: Dict[str, Any] = {}
-    
-    _state_file: Optional[Path] = None
-    _cache_file: Optional[Path] = None
+    # 存储源目录与目的目录关系
+    _dirconf: Dict[str, Optional[List[Path]]] = {}
+    # 存储每个源目录的轮询分发索引
     _round_robin_index: Dict[str, int] = {}
-    _allocation_cache: Dict[int, Path] = {}
-
-    # 并发锁
-    _destination_lock: Optional[threading.Lock] = None
+    # 状态文件路径
+    _state_file: Path = None
+    # 存储源目录转移方式
+    _transferconf: Dict[str, Optional[str]] = {}
+    _overwrite_mode: Dict[str, Optional[str]] = {}
+    _medias = {}
+    # 退出事件
+    _event = threading.Event()
+    # 【新增】运行时剧集目的地缓存，解决竞争问题
+    _series_dest_cache: Dict[int, Path] = {}
 
     def _save_state_to_file(self):
-        if not self._state_file: return
+        """将轮询状态保存到文件"""
+        if not self._state_file:
+            return
         try:
-            with self._state_file.open('w', encoding='utf-8') as f:
+            with open(self._state_file, 'w', encoding='utf-8') as f:
                 json.dump(self._round_robin_index, f, ensure_ascii=False, indent=4)
         except Exception as e:
             logger.error(f"无法保存轮询状态到文件 {self._state_file}: {e}")
 
-    def _load_state_from_file(self) -> Dict[str, int]:
-        if not self._state_file or not self._state_file.exists(): return {}
+    def _load_state_from_file(self):
+        """从文件加载轮询状态"""
+        if not self._state_file or not self._state_file.exists():
+            return {}
         try:
-            with self._state_file.open('r', encoding='utf-8') as f:
+            with open(self._state_file, 'r', encoding='utf-8') as f:
                 state = json.load(f)
-                return state if isinstance(state, dict) else {}
-        except Exception as e:
+                # 确保加载的状态是正确的字典格式
+                if isinstance(state, dict):
+                    logger.info(f"成功从 {self._state_file} 加载轮询状态。")
+                    return state
+                return {}
+        except (json.JSONDecodeError, Exception) as e:
             logger.error(f"无法从 {self._state_file} 加载轮询状态: {e}")
             return {}
 
-    def _save_cache_to_file(self):
-        if not self._cache_file: return
-        try:
-            with self._cache_file.open('w', encoding='utf-8') as f:
-                serializable_cache = {tmdb_id: str(path) for tmdb_id, path in self._allocation_cache.items()}
-                json.dump(serializable_cache, f, ensure_ascii=False, indent=4)
-        except Exception as e:
-            logger.error(f"无法保存分配缓存到文件 {self._cache_file}: {e}")
-
-    def _load_cache_from_file(self) -> Dict[int, Path]:
-        if not self._cache_file or not self._cache_file.exists(): return {}
-        try:
-            with self._cache_file.open('r', encoding='utf-8') as f:
-                loaded_data = json.load(f)
-                return {int(tmdb_id): Path(path) for tmdb_id, path in loaded_data.items()}
-        except Exception as e:
-            logger.error(f"无法从 {self._cache_file} 加载分配缓存: {e}")
-            return {}
-
-    def _update_cache_and_persist(self, tmdb_id: int, dest: Path):
-        self._allocation_cache[tmdb_id] = dest
-        self._save_cache_to_file()
-
     def _get_round_robin_destination(self, mon_path: str, mediainfo: MediaInfo) -> Optional[Path]:
-        # 使用 with 语句包裹整个函数，实现自动加锁和解锁，防止并发冲突
-        with self._destination_lock:
-            destinations = self._dirconf.get(mon_path)
-            if not destinations:
-                logger.error(f"监控源 {mon_path} 未配置目标目录")
-                return None
-            if len(destinations) == 1:
-                return destinations[0]
+        """
+        根据媒体信息和轮询策略选择一个目标目录。
+        1. 优先从内存缓存中查找该剧集的目的地，确保运行时一致性。
+        2. 如果缓存未命中，则查询数据库历史记录，作为跨重启的持久化策略。
+        3. 如果以上均未找到，则使用轮询算法选择一个新目录，并缓存结果。
+        """
+        destinations = self._dirconf.get(mon_path)
+        if not destinations:
+            logger.error(f"监控源 {mon_path} 未配置目标目录")
+            return None
 
-            tmdb_id = mediainfo.tmdb_id
-            if tmdb_id in self._allocation_cache:
-                cached_dest = self._allocation_cache[tmdb_id]
-                logger.info(f"为 '{mediainfo.title} ({mediainfo.year})' 命中缓存 -> {cached_dest}")
+        # 如果只有一个目标目录，则无需负载均衡
+        if len(destinations) == 1:
+            return destinations[0]
+        
+        tmdb_id = mediainfo.tmdb_id
+
+        # 1. 优先检查内存缓存
+        if tmdb_id in self._series_dest_cache:
+            cached_dest = self._series_dest_cache[tmdb_id]
+            # 确保缓存的目的地仍然是当前监控路径的有效目的地之一
+            if cached_dest in destinations:
+                logger.info(f"为 '{mediainfo.title_year}' 命中了内存缓存，将使用一致的目标目录: {cached_dest}")
                 return cached_dest
 
-            history_entry = self.transferhis.get_by_type_tmdbid(mtype=mediainfo.type.value, tmdbid=tmdb_id)
-            if history_entry and history_entry.dest:
-                historical_dest_path = Path(history_entry.dest)
-                for dest in destinations:
-                    try:
-                        if historical_dest_path.is_relative_to(dest):
-                            logger.info(f"为 '{mediainfo.title} ({mediainfo.year})' 找到历史记录 -> {dest}")
-                            self._update_cache_and_persist(tmdb_id, dest)
-                            return dest
-                    except ValueError: continue
-            
-            logger.info(f"缓存和历史未命中，为 '{mediainfo.title} ({mediainfo.year})' 启动物理目录扫描...")
-            expected_folder_prefix = f"{mediainfo.title} ({mediainfo.year})"
+        # 2. 缓存未命中，检查数据库历史记录
+        history_entry = self.transferhis.get_by_type_tmdbid(
+            mtype=mediainfo.type.value,
+            tmdbid=tmdb_id
+        )
+        if history_entry and history_entry.dest:
+            historical_dest_path = Path(history_entry.dest)
             for dest in destinations:
-                if not dest.is_dir(): continue
                 try:
-                    for sub_dir in dest.iterdir():
-                        if sub_dir.is_dir() and sub_dir.name.startswith(expected_folder_prefix):
-                            logger.info(f"物理扫描命中！在 '{dest}' 找到已存在目录: '{sub_dir.name}'")
-                            self._update_cache_and_persist(tmdb_id, dest)
-                            return dest
-                except OSError as e:
-                    logger.warning(f"扫描目录 {dest} 时出错: {e}")
+                    # 检查历史文件路径是否属于某个配置的目的地
+                    if historical_dest_path.is_relative_to(dest):
+                        logger.info(f"为 '{mediainfo.title_year}' 找到了已存在的转移记录，将使用一致的目标目录: {dest}")
+                        # 将找到的结果写入缓存，供后续使用
+                        self._series_dest_cache[tmdb_id] = dest
+                        return dest
+                except (ValueError, TypeError):
+                    # 路径不相关或类型错误时忽略
                     continue
 
-            logger.info(f"首次转移 '{mediainfo.title} ({mediainfo.year})'，执行轮询...")
-            last_index = self._round_robin_index.get(mon_path, -1)
-            next_index = (last_index + 1) % len(destinations)
-            self._round_robin_index[mon_path] = next_index
-            self._save_state_to_file()
-            chosen_dest = destinations[next_index]
-            logger.info(f"轮询为 '{mon_path}' 选择索引 {next_index} -> {chosen_dest}")
-            self._update_cache_and_persist(tmdb_id, chosen_dest)
-            return chosen_dest
+        # 3. 没有找到任何历史记录，使用轮询(Round-Robin)算法
+        logger.info(f"首次转移 '{mediainfo.title_year}'，将通过轮询方式选择新目录。")
+        last_index = self._round_robin_index.get(mon_path, -1)
+        next_index = (last_index + 1) % len(destinations)
+        
+        # 为下次运行保存新的索引
+        self._round_robin_index[mon_path] = next_index
+        # 将新状态持久化到文件
+        self._save_state_to_file()
+
+        chosen_dest = destinations[next_index]
+        logger.info(f"针对 '{mon_path}' 的轮询机制选择了索引 {next_index}: {chosen_dest}")
+
+        # 将新选择的目的地写入缓存，以备处理本部剧集的下一集时使用
+        self._series_dest_cache[tmdb_id] = chosen_dest
+
+        return chosen_dest
 
     def init_plugin(self, config: dict = None):
-        # 初始化并发锁
-        self._destination_lock = threading.Lock()
-        
         self.transferhis = TransferHistoryOper()
         self.downloadhis = DownloadHistoryOper()
         self.transferchian = TransferChain()
@@ -200,313 +217,772 @@ class CloudLinkMonitor(_PluginBase):
         self.storagechain = StorageChain()
         self.filetransfer = FileManagerModule()
         
+        # 初始化状态文件路径
         self._state_file = self.get_data_path() / "cloudlinkmonitor_state.json"
-        self._cache_file = self.get_data_path() / "cloudlinkmonitor_cache.json"
-        self._dirconf, self._transferconf, self._overwrite_mode = {}, {}, {}
+        
+        # 清空配置并在启动时从文件加载状态
+        self._dirconf = {}
+        self._transferconf = {}
+        self._overwrite_mode = {}
+        self._series_dest_cache = {}  # 【修改】确保每次重载配置时清空缓存
         self._round_robin_index = self._load_state_from_file()
-        self._allocation_cache = self._load_cache_from_file()
-        self._medias, self._observer = {}, []
 
+        # 读取配置
         if config:
-            self._enabled = config.get("enabled", False)
-            self._notify = config.get("notify", False)
-            self._onlyonce = config.get("onlyonce", False)
-            self._history = config.get("history", True)
-            self._scrape = config.get("scrape", False)
-            self._category = config.get("category", True)
-            self._refresh = config.get("refresh", True)
-            self._softlink = config.get("softlink", False)
-            self._strm = config.get("strm", False)
-            self._mode = config.get("mode", "fast")
-            self._transfer_type = config.get("transfer_type", "move")
-            self._monitor_dirs = config.get("monitor_dirs", "")
-            self._exclude_keywords = config.get("exclude_keywords", "")
-            self._interval = int(config.get("interval", 10))
+            self._enabled = config.get("enabled")
+            self._notify = config.get("notify")
+            self._onlyonce = config.get("onlyonce")
+            self._history = config.get("history")
+            self._scrape = config.get("scrape")
+            self._category = config.get("category")
+            self._refresh = config.get("refresh")
+            self._mode = config.get("mode")
+            self._transfer_type = config.get("transfer_type")
+            self._monitor_dirs = config.get("monitor_dirs") or ""
+            self._exclude_keywords = config.get("exclude_keywords") or ""
+            self._interval = config.get("interval") or 10
             self._cron = config.get("cron")
-            self._size = int(config.get("size", 100))
+            self._size = config.get("size") or 0
+            self._softlink = config.get("softlink")
+            self._strm = config.get("strm")
 
+        # 停止现有任务
         self.stop_service()
+
         if self._enabled or self._onlyonce:
+            # 定时服务管理器
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
             if self._notify:
-                self._scheduler.add_job(self.send_msg, 'interval', seconds=self._interval)
-            for line in self._monitor_dirs.split("\n"):
-                if not line.strip(): continue
-                conf_line = line
-                _overwrite_mode = 'rename'
-                if "@" in conf_line: conf_line, _overwrite_mode = conf_line.split("@", 1)
+                # 追加入库消息统一发送服务
+                self._scheduler.add_job(self.send_msg, trigger='interval', seconds=15)
+
+            # 读取目录配置
+            monitor_dirs = self._monitor_dirs.split("\n")
+            if not monitor_dirs:
+                return
+            for mon_path_conf in monitor_dirs:
+                # 格式源目录:目的目录
+                if not mon_path_conf:
+                    continue
+
+                # 自定义覆盖方式
+                _overwrite_mode = 'never'
+                if mon_path_conf.count("@") == 1:
+                    _overwrite_mode = mon_path_conf.split("@")[1]
+                    mon_path_conf = mon_path_conf.split("@")[0]
+
+                # 自定义转移方式
                 _transfer_type = self._transfer_type
-                if "#" in conf_line: conf_line, _transfer_type = conf_line.split("#", 1)
-                if ':' not in conf_line: continue
-                mon_path_str, dests_str = conf_line.split(":", 1)
-                mon_path = mon_path_str.strip()
-                dest_paths = [Path(p.strip()) for p in dests_str.split(',') if p.strip()]
-                if not mon_path or not dest_paths: continue
-                self._dirconf[mon_path] = dest_paths
+                if mon_path_conf.count("#") == 1:
+                    _transfer_type = mon_path_conf.split("#")[1]
+                    mon_path_conf = mon_path_conf.split("#")[0]
+                
+                paths = mon_path_conf.split(":", 1)
+                mon_path = ""
+                if len(paths) > 1:
+                    mon_path = paths[0].strip()
+                    dest_paths_str = paths[1].split(',')
+                    target_paths = [Path(p.strip()) for p in dest_paths_str if p.strip()]
+                    if target_paths:
+                        self._dirconf[mon_path] = target_paths
+                        logger.info(f"监控目录 '{mon_path}' -> 目标目录: {target_paths}")
+                    else:
+                        self._dirconf[mon_path] = None
+                else:
+                    mon_path = paths[0].strip()
+                    if mon_path:
+                        self._dirconf[mon_path] = None
+
+                if not mon_path:
+                    continue
+                    
                 self._transferconf[mon_path] = _transfer_type
                 self._overwrite_mode[mon_path] = _overwrite_mode
-                if self._enabled: self.start_observer(mon_path)
+
+                # 启用目录监控
+                if self._enabled:
+                    target_paths_check = self._dirconf.get(mon_path) or []
+                    can_monitor = True
+                    for target_path in target_paths_check:
+                        try:
+                            if target_path and target_path.is_relative_to(Path(mon_path)):
+                                logger.warn(f"目标目录 {target_path} 是监控目录 {mon_path} 的子目录，无法监控")
+                                self.systemmessage.put(f"目标目录 {target_path} 是监控目录 {mon_path} 的子目录，无法监控")
+                                can_monitor = False
+                                break
+                        except Exception as e:
+                            logger.debug(str(e))
+                            pass
+                    
+                    if not can_monitor:
+                        continue
+
+                    try:
+                        observer = PollingObserver(timeout=10) if self._mode == "compatibility" else Observer(timeout=10)
+                        self._observer.append(observer)
+                        observer.schedule(FileMonitorHandler(mon_path, self), path=mon_path, recursive=True)
+                        observer.daemon = True
+                        observer.start()
+                        logger.info(f"{mon_path} 的实时监控服务启动")
+                    except Exception as e:
+                        err_msg = str(e)
+                        if "inotify" in err_msg and "reached" in err_msg:
+                            logger.warn(
+                                f"实时监控服务启动异常：{err_msg}，请在宿主机上执行以下命令并重启："
+                                + """
+                                      echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf
+                                      && echo fs.inotify.max_user_instances=524288 | sudo tee -a /etc/sysctl.conf
+                                      && sudo sysctl -p
+                                      """)
+                        else:
+                            logger.error(f"{mon_path} 启动实时监控失败：{err_msg}")
+                        self.systemmessage.put(f"{mon_path} 启动实时监控失败：{err_msg}")
+
+            # 运行一次定时服务
             if self._onlyonce:
-                logger.info("立即运行一次全量同步...")
-                self._scheduler.add_job(self.sync_all, 'date', run_date=datetime.datetime.now(pytz.timezone(settings.TZ)) + datetime.timedelta(seconds=3))
+                logger.info("实时监控服务启动，立即运行一次")
+                self._scheduler.add_job(name="实时监控",
+                                        func=self.sync_all, trigger='date',
+                                        run_date=datetime.datetime.now(
+                                            tz=pytz.timezone(settings.TZ)) + datetime.timedelta(seconds=3)
+                                        )
                 self._onlyonce = False
                 self.__update_config()
-            if self._scheduler and self._scheduler.get_jobs(): self._scheduler.start()
 
-    def start_observer(self, mon_path: str):
-        for target_path in self._dirconf.get(mon_path, []):
-            try:
-                if target_path.is_relative_to(Path(mon_path)):
-                    logger.error(f"致命错误：目标目录 {target_path} 是监控目录 {mon_path} 的子目录！")
-                    return
-            except ValueError: pass
-        try:
-            observer = Observer(timeout=10) if self._mode == 'fast' else PollingObserver(timeout=10)
-            observer.schedule(FileMonitorHandler(mon_path, self), path=mon_path, recursive=True)
-            observer.daemon = True
-            observer.start()
-            self._observer.append(observer)
-            logger.info(f"已启动对 '{mon_path}' 的监控 ({self._mode}模式)。")
-        except Exception as e:
-            logger.error(f"启动对 '{mon_path}' 的监控失败: {e}")
-
-    def event_handler(self, event, mon_path: str, text: str, event_path: str):
-        if not event.is_directory:
-            self.__handle_file(event_path=event_path, mon_path=mon_path)
-
-    def __handle_file(self, event_path: str, mon_path: str):
-        file_path = Path(event_path)
-        try:
-            if not file_path.exists(): return
-            with lock:
-                if self.transferhis.get_by_src(event_path): return
-                if any(s in event_path for s in ('/@Recycle/', '/#recycle/', '/.')) or '/@eaDir/' in event_path: return
-                if self._exclude_keywords:
-                    for keyword in self._exclude_keywords.split("\n"):
-                        if keyword and re.search(keyword, event_path, re.IGNORECASE):
-                            logger.info(f"'{event_path}' 命中排除关键字 '{keyword}'，不处理。")
-                            return
-                if file_path.suffix.lower() not in settings.RMT_MEDIAEXT: return
-                if re.search(r"BDMV[/\\]STREAM", event_path, re.IGNORECASE):
-                    file_path = Path(re.split(r"BDMV", event_path, flags=re.IGNORECASE)[0])
-                    if self.transferhis.get_by_src(str(file_path)): return
-                file_meta = MetaInfoPath(file_path)
-                if not file_meta.name: return
-                if self._size > 0 and file_path.is_file() and file_path.stat().st_size < self._size * 1024 * 1024: return
-                file_item = self.storagechain.get_file_item(storage="local", path=file_path)
-                if not file_item: return
-                
-                mediainfo = self.mediaChain.recognize_media(meta=file_meta)
-                if not mediainfo:
-                    logger.warn(f"无法识别媒体信息: {file_path.name}")
-                    return
-
-                # 【最终修复】整合目录助手逻辑
-                # 1. 首先确定轮询的目标盘（根目录）
-                target_base_dir = self._get_round_robin_destination(mon_path, mediainfo)
-                if not target_base_dir:
-                    logger.error(f"无法为 '{mediainfo.title}' 获取轮询目标目录。")
-                    return
-                
-                # 2. 然后向主程序的目录助手请求目录结构配置
-                target_dir_conf = DirectoryHelper().get_dir(mediainfo, src_path=Path(mon_path))
-
-                # 3. 判断目录助手是否返回了有效的配置
-                if not target_dir_conf:
-                    logger.warning(f"目录助手未能为 '{mediainfo.title}' 生成目录配置，将使用插件的默认后备设置。")
-                    # 如果助手失败，则手动创建一个配置对象
-                    target_dir_conf = TransferDirectoryConf()
-                    target_dir_conf.library_category_folder = self._category
-                    target_dir_conf.scraping = self._scrape
-                    # 关键：手动设置重命名为True，这通常会触发标准文件夹结构的创建
-                    target_dir_conf.renaming = True 
-                else:
-                    logger.info(f"目录助手成功为 '{mediainfo.title}' 生成目录配置。")
-                    # 如果助手成功，我们也需要确保刮削设置与插件设置一致
-                    target_dir_conf.scraping = self._scrape
-
-                # 4. 无论助手是否成功，都将轮询选出的目标盘符作为最终的根路径
-                target_dir_conf.library_path = target_base_dir
-                
-                # 5. 无论助手是否成功，都使用插件自身定义的转移方式和覆盖模式
-                target_dir_conf.transfer_type = self._transferconf.get(mon_path, self._transfer_type)
-                target_dir_conf.overwrite_mode = self._overwrite_mode.get(mon_path, 'rename')
-
-                logger.info(f"[分发选择] 文件 '{file_path.name}' 的目标基准目录是: {target_dir_conf.library_path}")
-
-                episodes_info = None
-                if mediainfo.type == MediaType.TV:
-                    episodes_info = self.tmdbchain.tmdb_episodes(tmdbid=mediainfo.tmdb_id,
-                                                                 season=1 if file_meta.begin_season is None else file_meta.begin_season)
-                
-                transferinfo = self.transferchian.transfer(fileitem=file_item, meta=file_meta, mediainfo=mediainfo,
-                                                         target_directory=target_dir_conf, episodes_info=episodes_info)
-
-                if not transferinfo or not transferinfo.success:
-                    logger.error(f"文件转移失败: {file_path.name} - {transferinfo.message if transferinfo else '未知原因'}")
-                    return
-
-                logger.info(f"文件 '{file_path.name}' 成功转移到 '{transferinfo.target_item.path}'")
-                
-                if self._history: self.transferhis.add_success(fileitem=file_item, mode=target_dir_conf.transfer_type, meta=file_meta, mediainfo=mediainfo, transferinfo=transferinfo)
-                # 注意：刮削操作由转移链根据 target_dir_conf.scraping 的值来决定，这里无需重复调用
-                if self._notify: self.add_to_notification_queue(file_path, mediainfo, file_meta, transferinfo)
-                if self._refresh: self.eventmanager.send_event(EventType.TransferComplete, {'meta': file_meta, 'mediainfo': mediainfo, 'transferinfo': transferinfo})
-                if self._softlink: self.eventmanager.send_event(EventType.PluginAction, {'file_path': str(transferinfo.target_item.path), 'action': 'softlink_file'})
-                if self._strm: self.eventmanager.send_event(EventType.PluginAction, {'file_path': str(transferinfo.target_item.path), 'action': 'cloudstrm_file'})
-                if target_dir_conf.transfer_type == "move": self.cleanup_empty_dirs(file_path, mon_path)
-        except Exception as e:
-            logger.error(f"处理文件 '{event_path}' 时发生未知错误: {e}\n{traceback.format_exc()}")
-            
-    def cleanup_empty_dirs(self, file_path: Path, mon_path_str: str):
-        try:
-            parent_dir = file_path.parent
-            mon_path = Path(mon_path_str)
-            while parent_dir != mon_path and str(parent_dir).startswith(mon_path_str):
-                if not any(parent_dir.iterdir()):
-                    logger.info(f"移动模式，删除空目录：{parent_dir}")
-                    shutil.rmtree(parent_dir, ignore_errors=True)
-                    parent_dir = parent_dir.parent
-                else: break
-        except Exception as e:
-            logger.error(f"删除空目录时出错: {e}")
-            
-    def add_to_notification_queue(self, file_path, mediainfo, file_meta, transferinfo):
-        if mediainfo.type == MediaType.TV:
-            season_str = str(file_meta.season) if file_meta.season is not None else ''
-            season_num_match = re.search(r'\d+', season_str)
-            season_num = int(season_num_match.group(0)) if season_num_match else 1
-            key = f"{mediainfo.title} ({mediainfo.year}) S{season_num:02d}"
-        else:
-            key = f"{mediainfo.title} ({mediainfo.year})"
-
-        if key not in self._medias:
-            self._medias[key] = {"files": [], "time": datetime.datetime.now()}
-        self._medias[key]["files"].append({"path": str(file_path), "mediainfo": mediainfo, "file_meta": file_meta, "transferinfo": transferinfo})
-        self._medias[key]["time"] = datetime.datetime.now()
-
-    def send_msg(self):
-        if not self._medias: return
-        now = datetime.datetime.now()
-        for key, data in list(self._medias.items()):
-            if (now - data['time']).total_seconds() > self._interval:
-                files = data['files']
-                first_item = files[0]
-                mediainfo = first_item['mediainfo']
-                total_size = sum(f['transferinfo'].total_size for f in files)
-                file_count = len(files)
-                final_transfer_info = first_item['transferinfo']
-                final_transfer_info.total_size = total_size
-                final_transfer_info.file_count = file_count
-                season_episode = None
-                if mediainfo.type == MediaType.TV:
-                    episodes = sorted([f['file_meta'].begin_episode for f in files if f['file_meta'].begin_episode])
-                    season_str = str(first_item['file_meta'].season) if first_item['file_meta'].season is not None else ''
-                    season_num_match = re.search(r'\d+', season_str)
-                    season_num = int(season_num_match.group(0)) if season_num_match else 1
-                    season_episode = f"S{season_num:02d} {StringUtils.format_ep(episodes)}"
-                self.transferchian.send_transfer_message(meta=first_item['file_meta'], mediainfo=mediainfo, transferinfo=final_transfer_info, season_episode=season_episode)
-                del self._medias[key]
+            # 启动定时服务
+            if self._scheduler.get_jobs():
+                self._scheduler.print_jobs()
+                self._scheduler.start()
 
     def __update_config(self):
+        """
+        更新配置
+        """
         self.update_config({
-            "enabled": self._enabled, "notify": self._notify, "onlyonce": self._onlyonce, "history": self._history,
-            "scrape": self._scrape, "category": self._category, "refresh": self._refresh, "softlink": self._softlink,
-            "strm": self._strm, "mode": self._mode, "transfer_type": self._transfer_type,
-            "monitor_dirs": self._monitor_dirs, "exclude_keywords": self._exclude_keywords,
-            "interval": self._interval, "cron": self._cron, "size": self._size
+            "enabled": self._enabled,
+            "notify": self._notify,
+            "onlyonce": self._onlyonce,
+            "mode": self._mode,
+            "transfer_type": self._transfer_type,
+            "monitor_dirs": self._monitor_dirs,
+            "exclude_keywords": self._exclude_keywords,
+            "interval": self._interval,
+            "history": self._history,
+            "softlink": self._softlink,
+            "cron": self._cron,
+            "strm": self._strm,
+            "scrape": self._scrape,
+            "category": self._category,
+            "size": self._size,
+            "refresh": self._refresh,
         })
 
     @eventmanager.register(EventType.PluginAction)
     def remote_sync(self, event: Event):
-        if event and event.event_data and event.event_data.get("action") == "cloud_link_sync":
-            self.post_message(channel=event.event_data.get("channel"), title="开始同步监控目录 ...", userid=event.event_data.get("user"))
-            self.sync_all()
-            self.post_message(channel=event.event_data.get("channel"), title="监控目录同步完成！", userid=event.event_data.get("user"))
+        """
+        远程全量同步
+        """
+        if event:
+            event_data = event.event_data
+            if not event_data or event_data.get("action") != "cloud_link_sync":
+                return
+            self.post_message(channel=event.event_data.get("channel"),
+                              title="开始同步云盘实时监控目录 ...",
+                              userid=event.event_data.get("user"))
+        self.sync_all()
+        if event:
+            self.post_message(channel=event.event_data.get("channel"),
+                              title="云盘实时监控目录同步完成！", userid=event.event_data.get("user"))
 
     def sync_all(self):
-        logger.info("开始全量同步监控目录 ...")
+        """
+        立即运行一次，全量同步目录中所有文件
+        """
+        logger.info("开始全量同步云盘实时监控目录 ...")
+        # 遍历所有监控目录
         for mon_path in self._dirconf.keys():
-            logger.info(f"处理监控目录 {mon_path} ...")
-            try:
-                list_files = [p for p in Path(mon_path).rglob('*') if p.suffix.lower() in settings.RMT_MEDIAEXT]
-                logger.info(f"发现 {len(list_files)} 个媒体文件")
-                for file_path in list_files:
-                    self.__handle_file(event_path=str(file_path), mon_path=mon_path)
-            except Exception as e:
-                logger.error(f"处理目录 {mon_path} 时出错: {e}")
-        logger.info("全量同步监控目录完成！")
+            logger.info(f"开始处理监控目录 {mon_path} ...")
+            list_files = SystemUtils.list_files(Path(mon_path), settings.RMT_MEDIAEXT)
+            logger.info(f"监控目录 {mon_path} 共发现 {len(list_files)} 个文件")
+            # 遍历目录下所有文件
+            for file_path in list_files:
+                logger.info(f"开始处理文件 {file_path} ...")
+                self.__handle_file(event_path=str(file_path), mon_path=mon_path)
+        logger.info("全量同步云盘实时监控目录完成！")
+
+    def event_handler(self, event, mon_path: str, text: str, event_path: str):
+        """
+        处理文件变化
+        :param event: 事件
+        :param mon_path: 监控目录
+        :param text: 事件描述
+        :param event_path: 事件文件路径
+        """
+        if not event.is_directory:
+            # 文件发生变化
+            logger.debug("文件%s：%s" % (text, event_path))
+            self.__handle_file(event_path=event_path, mon_path=mon_path)
+
+    def __handle_file(self, event_path: str, mon_path: str):
+        """
+        同步一个文件
+        :param event_path: 事件文件路径
+        :param mon_path: 监控目录
+        """
+        file_path = Path(event_path)
+        try:
+            if not file_path.exists():
+                return
+            # 全程加锁
+            with lock:
+                transfer_history = self.transferhis.get_by_src(event_path)
+                if transfer_history:
+                    logger.info("文件已处理过：%s" % event_path)
+                    return
+
+                # 回收站及隐藏的文件不处理
+                if event_path.find('/@Recycle/') != -1 \
+                        or event_path.find('/#recycle/') != -1 \
+                        or event_path.find('/.') != -1 \
+                        or event_path.find('/@eaDir') != -1:
+                    logger.debug(f"{event_path} 是回收站或隐藏的文件")
+                    return
+
+                # 命中过滤关键字不处理
+                if self._exclude_keywords:
+                    for keyword in self._exclude_keywords.split("\n"):
+                        if keyword and re.findall(keyword, event_path):
+                            logger.info(f"{event_path} 命中过滤关键字 {keyword}，不处理")
+                            return
+
+                # 整理屏蔽词不处理
+                transfer_exclude_words = self.systemconfig.get(SystemConfigKey.TransferExcludeWords)
+                if transfer_exclude_words:
+                    for keyword in transfer_exclude_words:
+                        if not keyword:
+                            continue
+                        if keyword and re.search(r"%s" % keyword, event_path, re.IGNORECASE):
+                            logger.info(f"{event_path} 命中整理屏蔽词 {keyword}，不处理")
+                            return
+
+                # 不是媒体文件不处理
+                if file_path.suffix not in settings.RMT_MEDIAEXT:
+                    logger.debug(f"{event_path} 不是媒体文件")
+                    return
+
+                # 判断是不是蓝光目录
+                if re.search(r"BDMV[/\\]STREAM", event_path, re.IGNORECASE):
+                    # 截取BDMV前面的路径
+                    blurray_dir = event_path[:event_path.find("BDMV")]
+                    file_path = Path(blurray_dir)
+                    logger.info(f"{event_path} 是蓝光目录，更正文件路径为：{str(file_path)}")
+                    # 查询历史记录，已转移的不处理
+                    if self.transferhis.get_by_src(str(file_path)):
+                        logger.info(f"{file_path} 已整理过")
+                        return
+
+                # 元数据
+                file_meta = MetaInfoPath(file_path)
+                if not file_meta.name:
+                    logger.error(f"{file_path.name} 无法识别有效信息")
+                    return
+
+                # 判断文件大小
+                if self._size and float(self._size) > 0 and file_path.stat().st_size < float(self._size) * 1024 ** 3:
+                    logger.info(f"{file_path} 文件大小小于监控文件大小，不处理")
+                    return
+
+                # 查找这个文件项
+                file_item = self.storagechain.get_file_item(storage="local", path=file_path)
+                if not file_item:
+                    logger.warn(f"{event_path.name} 未找到对应的文件")
+                    return
+                    
+                # 识别媒体信息
+                mediainfo: MediaInfo = self.chain.recognize_media(meta=file_meta)
+                if not mediainfo:
+                    logger.warn(f'未识别到媒体信息，标题：{file_meta.name}')
+                    # 新增转移成功历史记录
+                    his = self.transferhis.add_fail(
+                        fileitem=file_item,
+                        mode=self._transferconf.get(mon_path),
+                        meta=file_meta
+                    )
+                    if self._notify:
+                        self.post_message(
+                            mtype=NotificationType.Manual,
+                            title=f"{file_path.name} 未识别到媒体信息，无法入库！\n"
+                                  f"回复：```\n/redo {his.id} [tmdbid]|[类型]\n``` 手动识别转移。"
+                        )
+                    return
+
+                # 如果未开启新增已入库媒体是否跟随TMDB信息变化则根据tmdbid查询之前的title
+                if not settings.SCRAP_FOLLOW_TMDB:
+                    transfer_history = self.transferhis.get_by_type_tmdbid(tmdbid=mediainfo.tmdb_id,
+                                                                           mtype=mediainfo.type.value)
+                    if transfer_history:
+                        mediainfo.title = transfer_history.title
+                logger.info(f"{file_path.name} 识别为：{mediainfo.type.value} {mediainfo.title_year}")
+                
+                # 使用新的轮询逻辑查询转移目的目录
+                target: Path = self._get_round_robin_destination(mon_path=mon_path, mediainfo=mediainfo)
+                if not target:
+                    logger.error(f"无法为 '{file_path.name}' 确定目标目录，已跳过。")
+                    return
+
+                # 查询转移方式
+                transfer_type = self._transferconf.get(mon_path)
+
+                # 获取集数据
+                if mediainfo.type == MediaType.TV:
+                    episodes_info = self.tmdbchain.tmdb_episodes(tmdbid=mediainfo.tmdb_id,
+                                                                season=1 if file_meta.begin_season is None else file_meta.begin_season)
+                else:
+                    episodes_info = None
+
+                # 查询转移目的目录
+                target_dir = DirectoryHelper().get_dir(mediainfo, src_path=Path(mon_path))
+                if not target_dir or not target_dir.library_path or not target_dir.download_path.startswith(mon_path):
+                    target_dir = TransferDirectoryConf()
+                    target_dir.library_path = target
+                    target_dir.transfer_type = transfer_type
+                    target_dir.scraping = self._scrape
+                    target_dir.renaming = True
+                    target_dir.notify = False
+                    target_dir.overwrite_mode = self._overwrite_mode.get(mon_path) or 'never'
+                    target_dir.library_storage = "local"
+                    target_dir.library_category_folder = self._category
+                else:
+                    # 如果目录助手匹配成功，需要将轮询选择的目标目录赋值给它
+                    target_dir.library_path = target
+                    target_dir.transfer_type = transfer_type
+                    target_dir.scraping = self._scrape
+                
+                if not target_dir.library_path:
+                    logger.error(f"未配置监控目录 {mon_path} 的目的目录")
+                    return
+
+                # 转移文件
+                transferinfo: TransferInfo = self.chain.transfer(fileitem=file_item,
+                                                                 meta=file_meta,
+                                                                 mediainfo=mediainfo,
+                                                                 target_directory=target_dir,
+                                                                 episodes_info=episodes_info)
+
+                if not transferinfo:
+                    logger.error("文件转移模块运行失败")
+                    return
+
+                if not transferinfo.success:
+                    # 转移失败
+                    logger.warn(f"{file_path.name} 入库失败：{transferinfo.message}")
+
+                    if self._history:
+                        # 新增转移失败历史记录
+                        self.transferhis.add_fail(
+                            fileitem=file_item,
+                            mode=transfer_type,
+                            meta=file_meta,
+                            mediainfo=mediainfo,
+                            transferinfo=transferinfo
+                        )
+                    if self._notify:
+                        self.post_message(
+                            mtype=NotificationType.Manual,
+                            title=f"{mediainfo.title_year}{file_meta.season_episode} 入库失败！",
+                            text=f"原因：{transferinfo.message or '未知'}",
+                            image=mediainfo.get_message_image()
+                        )
+                    return
+
+                if self._history:
+                    # 新增转移成功历史记录
+                    self.transferhis.add_success(
+                        fileitem=file_item,
+                        mode=transfer_type,
+                        meta=file_meta,
+                        mediainfo=mediainfo,
+                        transferinfo=transferinfo
+                    )
+
+                # 刮削
+                if self._scrape:
+                    self.mediaChain.scrape_metadata(fileitem=transferinfo.target_diritem,
+                                                    meta=file_meta,
+                                                    mediainfo=mediainfo)
+
+                if self._notify:
+                    # 发送消息汇总
+                    media_list = self._medias.get(mediainfo.title_year + " " + file_meta.season) or {}
+                    if media_list:
+                        media_files = media_list.get("files") or []
+                        if media_files:
+                            file_exists = False
+                            for file in media_files:
+                                if str(file_path) == file.get("path"):
+                                    file_exists = True
+                                    break
+                            if not file_exists:
+                                media_files.append({
+                                    "path": str(file_path),
+                                    "mediainfo": mediainfo,
+                                    "file_meta": file_meta,
+                                    "transferinfo": transferinfo
+                                })
+                        else:
+                            media_files = [
+                                {
+                                    "path": str(file_path),
+                                    "mediainfo": mediainfo,
+                                    "file_meta": file_meta,
+                                    "transferinfo": transferinfo
+                                }
+                            ]
+                        media_list = {
+                            "files": media_files,
+                            "time": datetime.datetime.now()
+                        }
+                    else:
+                        media_list = {
+                            "files": [
+                                {
+                                    "path": str(file_path),
+                                    "mediainfo": mediainfo,
+                                    "file_meta": file_meta,
+                                    "transferinfo": transferinfo
+                                }
+                            ],
+                            "time": datetime.datetime.now()
+                        }
+                    self._medias[mediainfo.title_year + " " + file_meta.season] = media_list
+
+                if self._refresh:
+                    # 广播事件
+                    self.eventmanager.send_event(EventType.TransferComplete, {
+                        'meta': file_meta,
+                        'mediainfo': mediainfo,
+                        'transferinfo': transferinfo
+                    })
+
+                if self._softlink:
+                    # 通知实时软连接生成
+                    self.eventmanager.send_event(EventType.PluginAction, {
+                        'file_path': str(transferinfo.target_item.path),
+                        'action': 'softlink_file'
+                    })
+
+                if self._strm:
+                    # 通知Strm助手生成
+                    self.eventmanager.send_event(EventType.PluginAction, {
+                        'file_path': str(transferinfo.target_item.path),
+                        'action': 'cloudstrm_file'
+                    })
+
+                # 移动模式删除空目录
+                if transfer_type == "move":
+                    for file_dir in file_path.parents:
+                        if len(str(file_dir)) <= len(str(Path(mon_path))):
+                            # 重要，删除到监控目录为止
+                            break
+                        files = SystemUtils.list_files(file_dir, settings.RMT_MEDIAEXT + settings.DOWNLOAD_TMPEXT)
+                        if not files:
+                            logger.warn(f"移动模式，删除空目录：{file_dir}")
+                            shutil.rmtree(file_dir, ignore_errors=True)
+
+        except Exception as e:
+            logger.error("目录监控发生错误：%s - %s" % (str(e), traceback.format_exc()))
+
+    def send_msg(self):
+        """
+        定时检查是否有媒体处理完，发送统一消息
+        """
+        if not self._medias or not self._medias.keys():
+            return
+
+        # 遍历检查是否已刮削完，发送消息
+        for medis_title_year_season in list(self._medias.keys()):
+            media_list = self._medias.get(medis_title_year_season)
+            logger.info(f"开始处理媒体 {medis_title_year_season} 消息")
+
+            if not media_list:
+                continue
+
+            # 获取最后更新时间
+            last_update_time = media_list.get("time")
+            media_files = media_list.get("files")
+            if not last_update_time or not media_files:
+                continue
+
+            transferinfo = media_files[0].get("transferinfo")
+            file_meta = media_files[0].get("file_meta")
+            mediainfo = media_files[0].get("mediainfo")
+            # 判断剧集最后更新时间距现在是已超过10秒或者电影，发送消息
+            if (datetime.datetime.now() - last_update_time).total_seconds() > int(self._interval) \
+                    or mediainfo.type == MediaType.MOVIE:
+                # 发送通知
+                if self._notify:
+
+                    # 汇总处理文件总大小
+                    total_size = 0
+                    file_count = 0
+
+                    # 剧集汇总
+                    episodes = []
+                    for file in media_files:
+                        transferinfo_item = file.get("transferinfo")
+                        total_size += transferinfo_item.total_size
+                        file_count += 1
+
+                        file_meta_item = file.get("file_meta")
+                        if file_meta_item and file_meta_item.begin_episode:
+                            episodes.append(file_meta_item.begin_episode)
+
+                    transferinfo.total_size = total_size
+                    # 汇总处理文件数量
+                    transferinfo.file_count = file_count
+
+                    # 剧集季集信息 S01 E01-E04 || S01 E01、E02、E04
+                    season_episode = None
+                    # 处理文件多，说明是剧集，显示季入库消息
+                    if mediainfo.type == MediaType.TV:
+                        # 季集文本
+                        season_episode = f"{file_meta.season} {StringUtils.format_ep(episodes)}"
+                    # 发送消息
+                    self.transferchian.send_transfer_message(meta=file_meta,
+                                                             mediainfo=mediainfo,
+                                                             transferinfo=transferinfo,
+                                                             season_episode=season_episode)
+                # 发送完消息，移出key
+                del self._medias[medis_title_year_season]
+                continue
 
     def get_state(self) -> bool:
         return self._enabled
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
-        return [{"cmd": "/cloud_link_sync", "event": EventType.PluginAction, "desc": "多目录监控同步", "data": {"action": "cloud_link_sync"}}]
+        """
+        定义远程控制命令
+        :return: 命令关键字、事件、描述、附带数据
+        """
+        return [{
+            "cmd": "/cloud_link_sync",
+            "event": EventType.PluginAction,
+            "desc": "云盘实时监控同步",
+            "category": "",
+            "data": {
+                "action": "cloud_link_sync"
+            }
+        }]
 
     def get_api(self) -> List[Dict[str, Any]]:
-        return [{"path": "/cloud_link_sync", "endpoint": self.sync, "methods": ["GET"], "summary": "多目录监控同步"}]
+        return [{
+            "path": "/cloud_link_sync",
+            "endpoint": self.sync,
+            "methods": ["GET"],
+            "summary": "云盘实时监控同步",
+            "description": "云盘实时监控同步",
+        }]
 
     def get_service(self) -> List[Dict[str, Any]]:
+        """
+        注册插件公共服务
+        """
         if self._enabled and self._cron:
-            return [{"id": "CloudLinkMonitor", "name": "多目录监控全量同步", "trigger": CronTrigger.from_crontab(self._cron),
-                     "func": self.sync_all, "kwargs": {}}]
+            return [{
+                "id": "CloudLinkMonitor",
+                "name": "云盘实时监控全量同步服务",
+                "trigger": CronTrigger.from_crontab(self._cron),
+                "func": self.sync_all,
+                "kwargs": {}
+            }]
         return []
 
     def sync(self) -> schemas.Response:
+        """
+        API调用目录同步
+        """
         self.sync_all()
         return schemas.Response(success=True)
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        placeholder_text = ('每一行一个配置，支持单目标或多目标轮询分发。\n'
-                            '【单目标】: /监控目录:/目标目录\n'
-                            '【多目标轮询】: /监控目录:/目标1,/目标2,/目标3\n'
-                            '【自定义转移】: /监控目录:/目标目录#转移方式 (例如 #move)\n'
-                            '【自定义覆盖】: /监控目录:/目标目录@覆盖方式 (例如 @rename)')
-        return ([{'component': 'VForm', 'content': [
-            {'component': 'VRow', 'content': [
-                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'enabled', 'label': '启用插件'}}]},
-                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'notify', 'label': '发送通知'}}]},
-                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'onlyonce', 'label': '立即运行一次'}}]}
-            ]},
-            {'component': 'VRow', 'content': [
-                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'history', 'label': '存储历史记录'}}]},
-                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'scrape', 'label': '是否刮削'}}]},
-                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'category', 'label': '是否二级分类'}}]}
-            ]},
-            {'component': 'VRow', 'content': [
-                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'refresh', 'label': '刷新媒体库'}}]},
-                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'softlink', 'label': '联动实时软连接'}}]},
-                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'strm', 'label': '联动Strm生成'}}]}
-            ]},
-            {'component': 'VRow', 'content': [
-                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSelect', 'props': {'model': 'mode', 'label': '监控模式', 'items': [{'title': '兼容模式', 'value': 'compatibility'}, {'title': '性能模式', 'value': 'fast'}]}}]},
-                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSelect', 'props': {'model': 'transfer_type', 'label': '转移方式', 'items': [{'title': '移动', 'value': 'move'}, {'title': '复制', 'value': 'copy'}, {'title': '硬链接', 'value': 'link'}, {'title': '软链接', 'value': 'softlink'}, {'title': 'Rclone复制', 'value': 'rclone_copy'}, {'title': 'Rclone移动', 'value': 'rclone_move'}]}}]},
-                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'cron', 'label': '定时任务', 'placeholder': '留空则禁用'}}]}
-            ]},
-            {'component': 'VRow', 'content': [
-                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'interval', 'label': '入库消息延迟(秒)', 'type': 'number'}}]},
-                {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'size', 'label': '最小文件大小(MB)', 'type': 'number'}}]}
-            ]},
-            {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VTextarea', 'props': {'model': 'monitor_dirs', 'label': '监控目录', 'rows': 5, 'placeholder': placeholder_text}}]}]},
-            {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VTextarea', 'props': {'model': 'exclude_keywords', 'label': '排除关键词', 'rows': 2, 'placeholder': '每一行一个关键词'}}]}]}
-        ]}], 
-        {"enabled": False, "notify": True, "onlyonce": False, "history": True, "scrape": False, "category": True,
-         "refresh": True, "softlink": False, "strm": False, "mode": "fast", "transfer_type": "move",
-         "monitor_dirs": "", "exclude_keywords": "", "interval": 10, "cron": "", "size": 100})
+        # 在提示信息中更新配置说明
+        placeholder_text = (
+            '每一行一个监控配置，支持以下格式：\n'
+            '1. 单目标目录：监控目录:转移目的目录\n'
+            '2. 多目标轮询：监控目录:目的1,目的2,目的3\n'
+            '3. 自定义转移方式：监控目录:转移目的目录#转移方式\n'
+            '支持的转移方式: move, copy, link, softlink, rclone_copy, rclone_move'
+        )
+        return [
+            {
+                'component': 'VForm',
+                'content': [
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [{'component': 'VSwitch', 'props': {'model': 'enabled', 'label': '启用插件'}}]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [{'component': 'VSwitch', 'props': {'model': 'notify', 'label': '发送通知'}}]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [
+                                    {'component': 'VSwitch', 'props': {'model': 'onlyonce', 'label': '立即运行一次'}}]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [
+                                    {'component': 'VSwitch', 'props': {'model': 'history', 'label': '存储历史记录'}}]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [{'component': 'VSwitch', 'props': {'model': 'scrape', 'label': '是否刮削'}}]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [
+                                    {'component': 'VSwitch', 'props': {'model': 'category', 'label': '是否二级分类'}}]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [
+                                    {'component': 'VSwitch', 'props': {'model': 'refresh', 'label': '刷新媒体库'}}]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [
+                                    {'component': 'VSwitch', 'props': {'model': 'softlink', 'label': '联动实时软连接'}}]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [{'component': 'VSwitch', 'props': {'model': 'strm', 'label': '联动Strm生成'}}]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [{
+                                    'component': 'VSelect',
+                                    'props': {
+                                        'model': 'mode', 'label': '监控模式',
+                                        'items': [{'title': '兼容模式', 'value': 'compatibility'},
+                                                  {'title': '性能模式', 'value': 'fast'}]
+                                    }
+                                }]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [{
+                                    'component': 'VSelect',
+                                    'props': {
+                                        'model': 'transfer_type', 'label': '转移方式',
+                                        'items': [{'title': '移动', 'value': 'move'},
+                                                  {'title': '复制', 'value': 'copy'},
+                                                  {'title': '硬链接', 'value': 'link'},
+                                                  {'title': '软链接', 'value': 'softlink'},
+                                                  {'title': 'Rclone复制', 'value': 'rclone_copy'},
+                                                  {'title': 'Rclone移动', 'value': 'rclone_move'}]
+                                    }
+                                }]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 4},
+                                'content': [{
+                                    'component': 'VTextField',
+                                    'props': {'model': 'interval', 'label': '入库消息延迟', 'placeholder': '10'}
+                                }]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [{
+                            'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                            'content': [{
+                                'component': 'VTextField',
+                                'props': {'model': 'cron', 'label': '定时任务', 'placeholder': '留空则不执行定时同步'}
+                            }]
+                        }]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [{
+                            'component': 'VCol', 'props': {'cols': 12},
+                            'content': [{
+                                'component': 'VTextarea',
+                                'props': {'model': 'monitor_dirs', 'label': '监控目录', 'rows': 5,
+                                          'placeholder': placeholder_text}
+                            }]
+                        }]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [{
+                            'component': 'VCol', 'props': {'cols': 12},
+                            'content': [{
+                                'component': 'VTextarea',
+                                'props': {'model': 'exclude_keywords', 'label': '排除关键词', 'rows': 2,
+                                          'placeholder': '每一行一个关键词'}
+                            }]
+                        }]
+                    },
+                ]
+            }
+        ], {
+            "enabled": False, "notify": False, "onlyonce": False, "history": False, "scrape": False, "category": False,
+            "refresh": True, "softlink": False, "strm": False, "mode": "fast", "transfer_type": "softlink",
+            "monitor_dirs": "", "exclude_keywords": "", "interval": 10, "cron": "", "size": 0
+        }
 
     def get_page(self) -> List[dict]:
-        return []
+        pass
 
     def stop_service(self):
+        """
+        退出插件
+        """
         if self._observer:
             for observer in self._observer:
                 try:
                     observer.stop()
                     observer.join()
                 except Exception as e:
-                    logger.error(f"停止监控器时出错: {e}")
+                    print(str(e))
         self._observer = []
-        if self._scheduler and self._scheduler.running:
-            self._scheduler.shutdown()
-        self._scheduler = None
+        if self._scheduler:
+            self._scheduler.remove_all_jobs()
+            if self._scheduler.running:
+                self._event.set()
+                self._scheduler.shutdown()
+                self._event.clear()
+            self._scheduler = None
