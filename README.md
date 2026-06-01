@@ -11,7 +11,7 @@ MoviePilot三方插件市场：https://github.com/thsrite/MoviePilot-Plugins/
 5. [Cloudflare IP优选 v1.4](https://github.com/jxxghp/MoviePilot-Plugins/tree/main/plugins/cloudflarespeedtest) `🌩 测试 Cloudflare CDN 延迟和速度，自动优选IP。`
 6. [自定义Hosts v1.1](https://github.com/jxxghp/MoviePilot-Plugins/tree/main/plugins/customhosts) `修改系统hosts文件，加速网络访问。`
 7. [下载进度推送 v1.1](https://github.com/jxxghp/MoviePilot-Plugins/tree/main/plugins/downloadingmsg) `定时推送正在下载进度。`
-8. [药丸签到 v1.4](https://github.com/jxxghp/MoviePilot-Plugins/tree/main/plugins/invitessignin) `药丸论坛签到。`
+8. [药丸签到 v1.4](https://github.com/jxxghp/MoviePilot-Plugins/tree/mainll/plugins/invitessignin) `药丸论坛签到。`
 9. [媒体文件同步删除 v1.7](https://github.com/jxxghp/MoviePilot-Plugins/tree/main/plugins/mediasyncdel) `同步删除历史记录、源文件和下载任务。`
 10. [消息转发 v1.1](https://github.com/jxxghp/MoviePilot-Plugins/tree/main/plugins/messageforward) `根据正则转发通知到其他WeChat应用。`
 11. [MoviePilot更新推送 v1.4](https://github.com/jxxghp/MoviePilot-Plugins/tree/main/plugins/moviepilotupdatenotify) `MoviePilot推送release更新通知、自动重启。`
